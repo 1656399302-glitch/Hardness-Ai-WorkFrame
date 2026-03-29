@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import config
 
@@ -173,3 +175,44 @@ def write_latest_handoff(payload: dict, workspace: str | Path | None = None) -> 
     target = latest_handoff_path(workspace)
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     return target
+
+
+def resume_state_path(workspace: str | Path | None = None) -> Path:
+    paths = ensure_workspace_layout(workspace)
+    return paths.runtime_dir / "resume-state.json"
+
+
+def read_resume_state(workspace: str | Path | None = None) -> dict[str, Any]:
+    target = resume_state_path(workspace)
+    if not target.exists():
+        return {
+            "status": "idle",
+            "next_phase": "planning",
+            "next_round": 1,
+            "message": "",
+            "updated_at": None,
+            "prompt": "",
+        }
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "status": "unknown",
+            "next_phase": "planning",
+            "next_round": 1,
+            "message": "resume-state.json could not be parsed",
+            "updated_at": None,
+            "prompt": "",
+        }
+
+
+def write_resume_state(
+    workspace: str | Path | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    target = resume_state_path(workspace)
+    current = read_resume_state(workspace)
+    current.update(fields)
+    current["updated_at"] = time.time()
+    target.write_text(json.dumps(current, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    return current

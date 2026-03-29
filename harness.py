@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -29,9 +30,11 @@ from agents import Agent, extract_primary_choice
 from artifacts import (
     append_decision,
     ensure_workspace_layout,
+    read_resume_state,
     sync_contract,
     sync_product_spec,
     sync_qa_report,
+    write_resume_state,
     write_latest_handoff,
     write_round_handoff,
 )
@@ -70,12 +73,23 @@ class EvaluationReport:
     operability: float = 0.0
 
 
+@dataclass
+class ResumePlan:
+    round_num: int = 1
+    phase: str = "contract"
+    source: str = "feedback"
+
+
 class Harness:
     """Planner -> contract -> builder -> evaluator loop with hard release gates."""
 
     def __init__(self):
         self.skill_registry = SkillRegistry()
         skill_catalog = self.skill_registry.build_catalog_prompt()
+        self._active_round = 0
+        self._active_phase = "bootstrap"
+        self._run_prompt = ""
+        self._signal_handlers: dict[int, object] = {}
 
         self.planner = Agent("planner", prompts.PLANNER_SYSTEM + skill_catalog, use_tools=True)
         self.builder = Agent("builder", prompts.BUILDER_SYSTEM + skill_catalog, use_tools=True)
@@ -96,6 +110,60 @@ class Harness:
             use_tools=True,
         )
 
+    def _persist_resume_point(
+        self,
+        next_phase: str,
+        next_round: int,
+        *,
+        status: str = "running",
+        message: str = "",
+    ) -> None:
+        self._active_phase = next_phase
+        self._active_round = max(int(next_round or 1), 1)
+        write_resume_state(
+            config.WORKSPACE,
+            status=status,
+            next_phase=next_phase,
+            next_round=self._active_round,
+            message=message,
+            prompt=self._run_prompt,
+        )
+
+    def _restore_signal_handlers(self) -> None:
+        for signum, previous in self._signal_handlers.items():
+            signal.signal(signum, previous)
+        self._signal_handlers.clear()
+
+    def _install_signal_handlers(self) -> None:
+        def _handler(signum, _frame):
+            signal_name = signal.Signals(signum).name
+            phase = self._active_phase or "contract"
+            round_num = max(self._active_round, 1)
+            reason = f"Interrupted by {signal_name} during {phase} phase of round {round_num}."
+            try:
+                self._persist_resume_point(
+                    phase,
+                    round_num,
+                    status="interrupted",
+                    message=reason,
+                )
+            except Exception:
+                pass
+            append_event(
+                "run_interrupted",
+                "Harness interrupted by signal",
+                signal=signal_name,
+                phase=phase,
+                round=round_num,
+                workspace=config.WORKSPACE,
+            )
+            tools.stop_dev_server()
+            raise KeyboardInterrupt(reason)
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            self._signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _handler)
+
     def run(
         self,
         user_prompt: str,
@@ -105,6 +173,10 @@ class Harness:
         project_dir = self._resolve_project_dir(user_prompt, resume_dir)
         config.WORKSPACE = os.path.abspath(project_dir)
         ensure_workspace_layout(config.WORKSPACE)
+        resume_plan = self._determine_resume_plan(resume_dir)
+        self._run_prompt = user_prompt
+        self._active_phase = "bootstrap"
+        self._active_round = max(resume_plan.round_num, 1)
 
         total_start = time.time()
         reset_state()
@@ -131,133 +203,232 @@ class Harness:
             skip_planning = not config.ENABLE_PLANNER or (bool(resume_dir) and spec_path.exists())
 
         log.info(f"Project directory: {config.WORKSPACE}{' (resume mode)' if resume_dir else ''}")
+        if resume_dir:
+            log.info(
+                f"Resume plan: start from {resume_plan.phase} phase of round {resume_plan.round_num} "
+                f"(source={resume_plan.source})."
+            )
 
-        # Phase 1: Planning
-        log.info("=" * 60)
-        log.info("PHASE 1: PLANNING")
-        log.info("=" * 60)
-        write_state(phase="planning", message="Planning phase")
-        plan_start = time.time()
-        if skip_planning:
-            append_decision(
-                "Planning",
-                "Planner skipped because an existing spec or explicit skip-planner request was provided.",
-                config.WORKSPACE,
-            )
-            if spec_path.exists():
-                log.info(f"Skipping planning; using existing {config.SPEC_FILE}.")
-            elif user_prompt.strip():
-                spec_path.write_text(user_prompt, encoding="utf-8")
-                log.info(f"Skipping planning; wrote provided prompt directly to {config.SPEC_FILE}.")
-            else:
-                raise RuntimeError("Cannot skip planning without an existing spec or fallback prompt.")
-        else:
-            append_decision(
-                "Planning",
-                "Planner enabled to turn the user prompt into a durable product specification before coding begins.",
-                config.WORKSPACE,
-            )
-            self.planner.run(
-                "Create the product specification for this request and save it to spec.md.\n\n"
-                f"{user_prompt}"
-            )
-        sync_product_spec(config.WORKSPACE)
-        log.info(f"Planning completed in {time.time() - plan_start:.0f}s")
-
-        score_history = self._load_existing_score_history()
-        start_round = self._detect_start_round()
         aborted_reason = ""
         last_report: EvaluationReport | None = None
+        was_interrupted = False
+        self._install_signal_handlers()
 
-        for round_offset in range(config.MAX_HARNESS_ROUNDS):
-            round_num = start_round + round_offset
-
+        try:
+            # Phase 1: Planning
             log.info("=" * 60)
-            log.info(f"ROUND {round_num}/{config.MAX_HARNESS_ROUNDS}: CONTRACT NEGOTIATION")
+            log.info("PHASE 1: PLANNING")
             log.info("=" * 60)
-            write_state(phase="contract", round=round_num, message=f"Negotiating contract for round {round_num}")
-            contract_start = time.time()
-            self._negotiate_contract(round_num)
-            sync_contract(round_num, config.WORKSPACE)
-            append_decision(
-                f"Round {round_num} Contract",
-                "Sprint contract negotiated before implementation. Coding is gated behind a reviewed contract.",
-                config.WORKSPACE,
-            )
-            log.info(f"Contract negotiation completed in {time.time() - contract_start:.0f}s")
-
-            log.info("=" * 60)
-            log.info(f"ROUND {round_num}/{config.MAX_HARNESS_ROUNDS}: BUILD")
-            log.info("=" * 60)
-            write_state(phase="build", round=round_num, message=f"Builder working on round {round_num}")
-            build_start = time.time()
-            build_task = self._build_task(round_num, score_history)
-            self.builder.run(build_task)
-            log.info(f"Build round {round_num} completed in {time.time() - build_start:.0f}s")
-
-            if not self.builder.last_run_success:
-                aborted_reason = f"Build round {round_num} failed ({self.builder.last_stop_reason})."
+            write_state(phase="planning", message="Planning phase")
+            if resume_plan.phase == "planning":
+                self._persist_resume_point("planning", 1, message="Planning phase")
+            plan_start = time.time()
+            if skip_planning:
                 append_decision(
-                    f"Round {round_num} Abort",
-                    aborted_reason + " Evaluation skipped because the builder did not finish cleanly.",
+                    "Planning",
+                    "Planner skipped because an existing spec or explicit skip-planner request was provided.",
                     config.WORKSPACE,
                 )
-                log.error(aborted_reason)
-                tools.stop_dev_server()
-                self._write_round_handoff(round_num, None, aborted_reason)
-                break
-
-            log.info("=" * 60)
-            log.info(f"ROUND {round_num}/{config.MAX_HARNESS_ROUNDS}: EVALUATE")
-            log.info("=" * 60)
-            write_state(phase="evaluate", round=round_num, message=f"Evaluator running for round {round_num}")
-            eval_start = time.time()
-            self.evaluator.run(self._evaluation_task(round_num))
-            tools.stop_dev_server()
-            log.info(f"Evaluation round {round_num} completed in {time.time() - eval_start:.0f}s")
-
-            report = self._extract_evaluation_report()
-            last_report = report
-            score_history.append(report.average_score)
-            sync_qa_report(round_num, config.WORKSPACE)
-            self._write_round_handoff(round_num, report, "")
-
-            log.info(
-                f"Round {round_num} average score: {report.average_score:.1f} / 10  "
-                f"(release threshold: {config.RELEASE_READY_SCORE:.1f})"
-            )
-            log.info(f"Score history: {score_history}")
-
-            passed, blockers = self._passes_release_gates(report)
-            if passed:
+                if spec_path.exists():
+                    log.info(f"Skipping planning; using existing {config.SPEC_FILE}.")
+                elif user_prompt.strip():
+                    spec_path.write_text(user_prompt, encoding="utf-8")
+                    log.info(f"Skipping planning; wrote provided prompt directly to {config.SPEC_FILE}.")
+                else:
+                    raise RuntimeError("Cannot skip planning without an existing spec or fallback prompt.")
+            else:
                 append_decision(
-                    f"Round {round_num} Release Gate",
-                    "All configured release gates passed.",
+                    "Planning",
+                    "Planner enabled to turn the user prompt into a durable product specification before coding begins.",
                     config.WORKSPACE,
                 )
-                write_state(
-                    status="passed",
-                    phase="complete",
-                    round=round_num,
-                    message=f"Passed release gates at round {round_num}",
+                self.planner.run(
+                    "Create the product specification for this request and save it to spec.md.\n\n"
+                    f"{user_prompt}"
                 )
-                log.info(f"PASSED QA at round {round_num}.")
-                break
+            sync_product_spec(config.WORKSPACE)
+            log.info(f"Planning completed in {time.time() - plan_start:.0f}s")
 
-            append_decision(
-                f"Round {round_num} Release Gate",
-                "Round failed release gates and must continue as a remediation round.",
-                config.WORKSPACE,
+            if resume_plan.phase == "planning":
+                resume_plan = ResumePlan(round_num=1, phase="contract", source="resume_checkpoint")
+
+            score_history = self._load_existing_score_history()
+            start_round = resume_plan.round_num
+
+            for round_offset in range(config.MAX_HARNESS_ROUNDS):
+                round_num = start_round + round_offset
+                round_start_phase = resume_plan.phase if round_offset == 0 else "contract"
+
+                if round_start_phase == "contract":
+                    log.info("=" * 60)
+                    log.info(f"ROUND {round_num}/{config.MAX_HARNESS_ROUNDS}: CONTRACT NEGOTIATION")
+                    log.info("=" * 60)
+                    write_state(phase="contract", round=round_num, message=f"Negotiating contract for round {round_num}")
+                    self._persist_resume_point(
+                        "contract",
+                        round_num,
+                        message=f"Contract negotiation for round {round_num}",
+                    )
+                    contract_start = time.time()
+                    self._negotiate_contract(round_num)
+                    sync_contract(round_num, config.WORKSPACE)
+                    append_decision(
+                        f"Round {round_num} Contract",
+                        "Sprint contract negotiated before implementation. Coding is gated behind a reviewed contract.",
+                        config.WORKSPACE,
+                    )
+                    log.info(f"Contract negotiation completed in {time.time() - contract_start:.0f}s")
+                    round_start_phase = "build"
+                else:
+                    log.info(f"Resuming round {round_num} from {round_start_phase}; skipping earlier round phases.")
+
+                if round_start_phase == "build":
+                    log.info("=" * 60)
+                    log.info(f"ROUND {round_num}/{config.MAX_HARNESS_ROUNDS}: BUILD")
+                    log.info("=" * 60)
+                    write_state(phase="build", round=round_num, message=f"Builder working on round {round_num}")
+                    self._persist_resume_point(
+                        "build",
+                        round_num,
+                        message=f"Build phase for round {round_num}",
+                    )
+                    build_start = time.time()
+                    build_task = self._build_task(round_num, score_history)
+                    self.builder.run(build_task)
+                    log.info(f"Build round {round_num} completed in {time.time() - build_start:.0f}s")
+
+                    if not self.builder.last_run_success:
+                        aborted_reason = f"Build round {round_num} failed ({self.builder.last_stop_reason})."
+                        append_decision(
+                            f"Round {round_num} Abort",
+                            aborted_reason + " Evaluation skipped because the builder did not finish cleanly.",
+                            config.WORKSPACE,
+                        )
+                        self._persist_resume_point(
+                            "build",
+                            round_num,
+                            status="aborted",
+                            message=aborted_reason,
+                        )
+                        log.error(aborted_reason)
+                        tools.stop_dev_server()
+                        self._write_round_handoff(round_num, None, aborted_reason)
+                        break
+
+                    round_start_phase = "evaluate"
+
+                if round_start_phase == "evaluate":
+                    log.info("=" * 60)
+                    log.info(f"ROUND {round_num}/{config.MAX_HARNESS_ROUNDS}: EVALUATE")
+                    log.info("=" * 60)
+                    write_state(phase="evaluate", round=round_num, message=f"Evaluator running for round {round_num}")
+                    self._persist_resume_point(
+                        "evaluate",
+                        round_num,
+                        message=f"Evaluation phase for round {round_num}",
+                    )
+                    eval_start = time.time()
+                    self.evaluator.run(self._evaluation_task(round_num))
+                    tools.stop_dev_server()
+                    log.info(f"Evaluation round {round_num} completed in {time.time() - eval_start:.0f}s")
+
+                    if not self.evaluator.last_run_success:
+                        aborted_reason = f"Evaluation round {round_num} failed ({self.evaluator.last_stop_reason})."
+                        append_decision(
+                            f"Round {round_num} Abort",
+                            aborted_reason + " The run can resume from evaluator on the same round.",
+                            config.WORKSPACE,
+                        )
+                        self._persist_resume_point(
+                            "evaluate",
+                            round_num,
+                            status="aborted",
+                            message=aborted_reason,
+                        )
+                        log.error(aborted_reason)
+                        self._write_round_handoff(round_num, None, aborted_reason)
+                        break
+
+                    report = self._extract_evaluation_report()
+                    last_report = report
+                    score_history.append(report.average_score)
+                    sync_qa_report(round_num, config.WORKSPACE)
+                    self._write_round_handoff(round_num, report, "")
+
+                    log.info(
+                        f"Round {round_num} average score: {report.average_score:.1f} / 10  "
+                        f"(release threshold: {config.RELEASE_READY_SCORE:.1f})"
+                    )
+                    log.info(f"Score history: {score_history}")
+
+                    passed, blockers = self._passes_release_gates(report)
+                    if passed:
+                        append_decision(
+                            f"Round {round_num} Release Gate",
+                            "All configured release gates passed.",
+                            config.WORKSPACE,
+                        )
+                        self._persist_resume_point(
+                            "complete",
+                            round_num,
+                            status="passed",
+                            message=f"Passed release gates at round {round_num}",
+                        )
+                        write_state(
+                            status="passed",
+                            phase="complete",
+                            round=round_num,
+                            message=f"Passed release gates at round {round_num}",
+                        )
+                        log.info(f"PASSED QA at round {round_num}.")
+                        break
+
+                    self._persist_resume_point(
+                        "contract",
+                        round_num + 1,
+                        status="running",
+                        message=f"Continuing to remediation round {round_num + 1}",
+                    )
+                    append_decision(
+                        f"Round {round_num} Release Gate",
+                        "Round failed release gates and must continue as a remediation round.",
+                        config.WORKSPACE,
+                    )
+                    for blocker in blockers:
+                        log.warning(f"Release gate failed: {blocker}")
+                    continue
+
+                raise RuntimeError(f"Unsupported resume phase: {round_start_phase}")
+            else:
+                aborted_reason = f"Did not pass QA after {config.MAX_HARNESS_ROUNDS} rounds."
+                self._persist_resume_point(
+                    "contract",
+                    start_round + config.MAX_HARNESS_ROUNDS,
+                    status="failed",
+                    message=aborted_reason,
+                )
+                write_state(status="failed", phase="complete", message=aborted_reason)
+                log.warning(aborted_reason)
+
+        except KeyboardInterrupt as exc:
+            was_interrupted = True
+            aborted_reason = str(exc) or "Harness interrupted."
+            self._persist_resume_point(
+                self._active_phase or "contract",
+                max(self._active_round, 1),
+                status="interrupted",
+                message=aborted_reason,
             )
-            for blocker in blockers:
-                log.warning(f"Release gate failed: {blocker}")
-        else:
-            aborted_reason = f"Did not pass QA after {config.MAX_HARNESS_ROUNDS} rounds."
-            write_state(status="failed", phase="complete", message=aborted_reason)
+            if self._active_round:
+                self._write_round_handoff(self._active_round, None, aborted_reason)
+            write_state(status="interrupted", phase="complete", round=max(self._active_round, 1), message=aborted_reason)
             log.warning(aborted_reason)
+        finally:
+            self._restore_signal_handlers()
+            tools.stop_dev_server()
 
         total_duration = time.time() - total_start
-        if aborted_reason and last_report is None:
+        if aborted_reason and last_report is None and not was_interrupted:
             write_state(status="aborted", phase="complete", message=aborted_reason)
         if last_report and not aborted_reason and write_state:
             write_state(message="Harness finished", phase="complete")
@@ -449,6 +620,27 @@ class Harness:
             return []
         report = self._extract_evaluation_report()
         return [report.average_score] if report.average_score > 0 else []
+
+    def _determine_resume_plan(self, resume_dir: str | None) -> ResumePlan:
+        if not resume_dir:
+            return ResumePlan(round_num=1, phase="contract", source="new_run")
+
+        checkpoint = read_resume_state(config.WORKSPACE)
+        phase = str(checkpoint.get("next_phase") or "").strip().lower()
+        status = str(checkpoint.get("status") or "").strip().lower()
+        try:
+            round_num = int(checkpoint.get("next_round") or 0)
+        except (TypeError, ValueError):
+            round_num = 0
+
+        if status in {"running", "interrupted", "aborted"} and phase in {"planning", "contract", "build", "evaluate"} and round_num >= 1:
+            return ResumePlan(round_num=round_num, phase=phase, source="resume_checkpoint")
+
+        return ResumePlan(
+            round_num=self._detect_start_round(),
+            phase="contract",
+            source="feedback_history",
+        )
 
     def _detect_start_round(self) -> int:
         feedback_path = Path(config.WORKSPACE) / config.FEEDBACK_FILE

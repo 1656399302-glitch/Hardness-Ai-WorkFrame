@@ -51,6 +51,46 @@ ENV_SPECS = [
         group="API",
     ),
     EnvSpec(
+        name="API_REQUEST_TIMEOUT_SECONDS",
+        label="API Request Timeout",
+        default="90",
+        description="Timeout in seconds for a single LLM API request before the harness treats it as transient failure.",
+        group="API",
+        advanced=True,
+    ),
+    EnvSpec(
+        name="API_RECOVERY_POLL_SECONDS",
+        label="API Recovery Poll",
+        default="15",
+        description="Seconds between connectivity checks while waiting for network recovery.",
+        group="API",
+        advanced=True,
+    ),
+    EnvSpec(
+        name="API_MAX_RECOVERY_WAIT_SECONDS",
+        label="API Recovery Max Wait",
+        default="0",
+        description="Maximum seconds to wait for API recovery before aborting. Use 0 to wait indefinitely.",
+        group="API",
+        advanced=True,
+    ),
+    EnvSpec(
+        name="API_RETRY_BACKOFF_SECONDS",
+        label="API Retry Backoff",
+        default="5",
+        description="Base delay in seconds between retries for transient API failures such as rate limits or 5xx errors.",
+        group="API",
+        advanced=True,
+    ),
+    EnvSpec(
+        name="API_RETRY_MAX_BACKOFF_SECONDS",
+        label="API Retry Max Backoff",
+        default="60",
+        description="Maximum delay in seconds between retries for transient API failures.",
+        group="API",
+        advanced=True,
+    ),
+    EnvSpec(
         name="HARNESS_WORKSPACE",
         label="Workspace Root",
         default="./workspace",
@@ -189,6 +229,28 @@ def _get_bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _get_int_env(name: str) -> int:
+    raw = os.environ.get(name, _spec_default(name))
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid integer value for {name}: {raw!r}. "
+            f"Update {ENV_FILE} and use a plain integer such as {_spec_default(name)!r}."
+        ) from exc
+
+
+def _get_float_env(name: str) -> float:
+    raw = os.environ.get(name, _spec_default(name))
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid numeric value for {name}: {raw!r}. "
+            f"Update {ENV_FILE} and use a plain number such as {_spec_default(name)!r}."
+        ) from exc
+
+
 def _spec_default(name: str) -> str:
     for spec in ENV_SPECS:
         if spec.name == name:
@@ -255,34 +317,35 @@ _load_dotenv()
 API_KEY = os.environ.get("OPENAI_API_KEY", _spec_default("OPENAI_API_KEY"))
 BASE_URL = os.environ.get("OPENAI_BASE_URL", _spec_default("OPENAI_BASE_URL"))
 MODEL = os.environ.get("HARNESS_MODEL", _spec_default("HARNESS_MODEL"))
+API_REQUEST_TIMEOUT_SECONDS = _get_int_env("API_REQUEST_TIMEOUT_SECONDS")
+API_RECOVERY_POLL_SECONDS = _get_int_env("API_RECOVERY_POLL_SECONDS")
+API_MAX_RECOVERY_WAIT_SECONDS = _get_int_env("API_MAX_RECOVERY_WAIT_SECONDS")
+API_RETRY_BACKOFF_SECONDS = _get_int_env("API_RETRY_BACKOFF_SECONDS")
+API_RETRY_MAX_BACKOFF_SECONDS = _get_int_env("API_RETRY_MAX_BACKOFF_SECONDS")
 
 # --- Paths / layout ---
 WORKSPACE = os.path.abspath(os.environ.get("HARNESS_WORKSPACE", _spec_default("HARNESS_WORKSPACE")))
 ARTIFACT_ROOT_NAME = os.environ.get("HARNESS_ARTIFACT_ROOT", _spec_default("HARNESS_ARTIFACT_ROOT"))
 DASHBOARD_HOST = os.environ.get("HARNESS_DASHBOARD_HOST", _spec_default("HARNESS_DASHBOARD_HOST"))
-DASHBOARD_PORT = int(os.environ.get("HARNESS_DASHBOARD_PORT", _spec_default("HARNESS_DASHBOARD_PORT")))
+DASHBOARD_PORT = _get_int_env("HARNESS_DASHBOARD_PORT")
 
 # --- Context lifecycle ---
-COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", _spec_default("COMPRESS_THRESHOLD")))
-RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", _spec_default("RESET_THRESHOLD")))
-MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", _spec_default("MAX_AGENT_ITERATIONS")))
+COMPRESS_THRESHOLD = _get_int_env("COMPRESS_THRESHOLD")
+RESET_THRESHOLD = _get_int_env("RESET_THRESHOLD")
+MAX_AGENT_ITERATIONS = _get_int_env("MAX_AGENT_ITERATIONS")
 MAX_TOOL_ERRORS = 5
 
 # --- Orchestration ---
 ENABLE_PLANNER = _get_bool_env("ENABLE_PLANNER", True)
-MAX_HARNESS_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", _spec_default("MAX_HARNESS_ROUNDS")))
+MAX_HARNESS_ROUNDS = _get_int_env("MAX_HARNESS_ROUNDS")
 
 # --- Quality gates ---
-RELEASE_READY_SCORE = float(os.environ.get("RELEASE_READY_SCORE", _spec_default("RELEASE_READY_SCORE")))
-CORE_SCORE_FLOOR = float(os.environ.get("CORE_SCORE_FLOOR", _spec_default("CORE_SCORE_FLOOR")))
-STRICT_CORRECTNESS_FLOOR = float(
-    os.environ.get("STRICT_CORRECTNESS_FLOOR", _spec_default("STRICT_CORRECTNESS_FLOOR"))
-)
-STRICT_OPERABILITY_FLOOR = float(
-    os.environ.get("STRICT_OPERABILITY_FLOOR", _spec_default("STRICT_OPERABILITY_FLOOR"))
-)
-MAX_CRITICAL_BUGS = int(os.environ.get("MAX_CRITICAL_BUGS", _spec_default("MAX_CRITICAL_BUGS")))
-MAX_MAJOR_BUGS = int(os.environ.get("MAX_MAJOR_BUGS", _spec_default("MAX_MAJOR_BUGS")))
+RELEASE_READY_SCORE = _get_float_env("RELEASE_READY_SCORE")
+CORE_SCORE_FLOOR = _get_float_env("CORE_SCORE_FLOOR")
+STRICT_CORRECTNESS_FLOOR = _get_float_env("STRICT_CORRECTNESS_FLOOR")
+STRICT_OPERABILITY_FLOOR = _get_float_env("STRICT_OPERABILITY_FLOOR")
+MAX_CRITICAL_BUGS = _get_int_env("MAX_CRITICAL_BUGS")
+MAX_MAJOR_BUGS = _get_int_env("MAX_MAJOR_BUGS")
 REQUIRE_FULL_SPEC_COVERAGE = _get_bool_env("REQUIRE_FULL_SPEC_COVERAGE", True)
 REQUIRE_BROWSER_VERIFICATION = _get_bool_env("REQUIRE_BROWSER_VERIFICATION", True)
 BLOCK_PLACEHOLDER_UI = _get_bool_env("BLOCK_PLACEHOLDER_UI", True)

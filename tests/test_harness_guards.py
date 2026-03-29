@@ -2,11 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import config
 import agents
 import context
-from artifacts import ensure_workspace_layout
+from artifacts import ensure_workspace_layout, read_resume_state, write_resume_state
 from harness import EvaluationReport, Harness
 
 
@@ -575,6 +576,76 @@ class HarnessGuardsTest(unittest.TestCase):
         self.assertEqual(round_numbers, [3])
         self.assertEqual(Path(config.WORKSPACE).resolve(), project_dir.resolve())
 
+    def test_resume_mode_prefers_workspace_checkpoint_for_build_phase(self):
+        project_dir = Path(config.WORKSPACE) / "checkpoint-build-project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / config.SPEC_FILE).write_text("existing spec", encoding="utf-8")
+        (project_dir / config.FEEDBACK_FILE).write_text(
+            "## QA Evaluation — Round 2\n\n### Scores\n- Functionality: 7.0/10\n- **Average: 7.2/10**\n",
+            encoding="utf-8",
+        )
+        write_resume_state(project_dir, status="interrupted", next_phase="build", next_round=5, message="killed")
+
+        harness = Harness()
+        build_tasks = []
+
+        harness.planner.run = lambda _task: self.fail("planner should not run in skip-planner mode")
+        harness._negotiate_contract = lambda _round_num: self.fail("contract should not rerun from build checkpoint")
+
+        def fail_build(task):
+            build_tasks.append(task)
+            harness.builder.last_run_success = False
+            harness.builder.last_stop_reason = "api_error"
+            return ""
+
+        harness.builder.run = fail_build
+        harness.evaluator.run = lambda _task: self.fail("evaluator should not run when build fails")
+
+        harness.run(
+            "Continue from current workspace",
+            resume_dir=str(project_dir),
+            skip_planning=True,
+        )
+
+        self.assertEqual(len(build_tasks), 1)
+        self.assertIn("Builder round 5", build_tasks[0])
+        checkpoint = read_resume_state(project_dir)
+        self.assertEqual(checkpoint["next_phase"], "build")
+        self.assertEqual(checkpoint["next_round"], 5)
+
+    def test_resume_mode_prefers_workspace_checkpoint_for_evaluate_phase(self):
+        project_dir = Path(config.WORKSPACE) / "checkpoint-eval-project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / config.SPEC_FILE).write_text("existing spec", encoding="utf-8")
+        write_resume_state(project_dir, status="interrupted", next_phase="evaluate", next_round=4, message="killed")
+
+        harness = Harness()
+        evaluator_calls = []
+
+        harness.planner.run = lambda _task: self.fail("planner should not run in skip-planner mode")
+        harness._negotiate_contract = lambda _round_num: self.fail("contract should not rerun from evaluate checkpoint")
+        harness.builder.run = lambda _task: self.fail("builder should not rerun from evaluate checkpoint")
+
+        def fail_eval(task):
+            evaluator_calls.append(task)
+            harness.evaluator.last_run_success = False
+            harness.evaluator.last_stop_reason = "api_error"
+            return ""
+
+        harness.evaluator.run = fail_eval
+
+        harness.run(
+            "Continue from current workspace",
+            resume_dir=str(project_dir),
+            skip_planning=True,
+        )
+
+        self.assertEqual(len(evaluator_calls), 1)
+        self.assertIn("QA round 4", evaluator_calls[0])
+        checkpoint = read_resume_state(project_dir)
+        self.assertEqual(checkpoint["next_phase"], "evaluate")
+        self.assertEqual(checkpoint["next_round"], 4)
+
     def test_build_task_prioritizes_feedback_remediation_when_feedback_exists(self):
         project_dir = Path(config.WORKSPACE) / "remediation-project"
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -647,6 +718,63 @@ class HarnessGuardsTest(unittest.TestCase):
         self.assertEqual(result, "done")
         self.assertTrue(agent.last_run_success)
         self.assertEqual(agent.last_stop_reason, "completed")
+
+    def test_agent_retries_same_iteration_after_timeout(self):
+        attempts = {"count": 0}
+
+        class FakeCompletions:
+            def create(self, **_kwargs):
+                attempts["count"] += 1
+                if attempts["count"] < 3:
+                    raise RuntimeError("Request timed out.")
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="done", tool_calls=[]),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        agent = agents.Agent("builder", "system", use_tools=False)
+
+        with patch("agents.get_client", return_value=fake_client), patch(
+            "agents._wait_for_api_recovery",
+            return_value=True,
+        ) as recovery_mock:
+            result = agent.run("ship it")
+
+        self.assertEqual(result, "done")
+        self.assertTrue(agent.last_run_success)
+        self.assertEqual(agent.last_stop_reason, "completed")
+        self.assertEqual(agent.last_iterations, 1)
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(recovery_mock.call_count, 2)
+
+    def test_agent_aborts_cleanly_when_api_recovery_timeout_expires(self):
+        class FakeCompletions:
+            def create(self, **_kwargs):
+                raise RuntimeError("Request timed out.")
+
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        agent = agents.Agent("builder", "system", use_tools=False)
+
+        with patch("agents.get_client", return_value=fake_client), patch(
+            "agents._wait_for_api_recovery",
+            return_value=False,
+        ):
+            result = agent.run("ship it")
+
+        self.assertEqual(result, "")
+        self.assertFalse(agent.last_run_success)
+        self.assertEqual(agent.last_stop_reason, "api_recovery_timeout")
+        self.assertEqual(agent.last_iterations, 1)
+
+    def test_invalid_integer_env_reports_field_name(self):
+        with patch.dict("os.environ", {"MAX_AGENT_ITERATIONS": "100s"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "MAX_AGENT_ITERATIONS"):
+                config._get_int_env("MAX_AGENT_ITERATIONS")
 
 
 if __name__ == "__main__":

@@ -7,12 +7,28 @@ from __future__ import annotations
 import json
 import time
 import logging
-from openai import OpenAI
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    ConflictError,
+    InternalServerError,
+    NotFoundError,
+    OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+    UnprocessableEntityError,
+)
 
 import config
 import tools
 import context
-from runtime_state import write_state
+from runtime_state import append_event, write_state
 
 log = logging.getLogger("harness")
 
@@ -29,8 +45,8 @@ def get_client() -> OpenAI:
         _client = OpenAI(
             api_key=config.API_KEY,
             base_url=config.BASE_URL,
-            timeout=300.0,        # 5 min per request
-            max_retries=2,
+            timeout=float(config.API_REQUEST_TIMEOUT_SECONDS),
+            max_retries=0,
         )
     return _client
 
@@ -64,6 +80,133 @@ def llm_call_simple(messages: list[dict]) -> str:
         log.error(f"[summarizer] Invalid API response: {e}")
         return ""
     return choice.message.content or ""
+
+
+def _is_fatal_api_error(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            AuthenticationError,
+            PermissionDeniedError,
+            BadRequestError,
+            NotFoundError,
+            ConflictError,
+            UnprocessableEntityError,
+        ),
+    )
+
+
+def _is_connectivity_error(exc: Exception) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection error",
+            "connection reset",
+            "connection refused",
+            "network is unreachable",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "server disconnected",
+            "remote end closed",
+            "nodename nor servname provided",
+        )
+    )
+
+
+def _is_retryable_api_error(exc: Exception) -> bool:
+    if _is_connectivity_error(exc):
+        return True
+    if isinstance(exc, (RateLimitError, InternalServerError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        status_code = getattr(exc, "status_code", None)
+        return status_code is None or status_code >= 500 or status_code in {408, 409, 425, 429}
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "rate limit",
+            "too many requests",
+            "service unavailable",
+            "temporarily unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "server error",
+            "overloaded",
+        )
+    )
+
+
+def _retry_delay_seconds(attempt: int) -> int:
+    base = max(config.API_RETRY_BACKOFF_SECONDS, 1)
+    ceiling = max(config.API_RETRY_MAX_BACKOFF_SECONDS, base)
+    return min(base * (2 ** max(attempt - 1, 0)), ceiling)
+
+
+def _probe_api_base_url() -> tuple[bool, str]:
+    try:
+        request = urllib_request.Request(
+            config.BASE_URL,
+            headers={"User-Agent": "Harness/1.0"},
+            method="HEAD",
+        )
+        with urllib_request.urlopen(request, timeout=min(config.API_RECOVERY_POLL_SECONDS, 5)) as response:
+            status = getattr(response, "status", 200)
+            return True, f"HTTP {status}"
+    except urllib_error.HTTPError as exc:
+        return True, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _wait_for_api_recovery(agent_name: str, iteration: int, error: Exception, outage_started_at: float) -> bool:
+    append_event(
+        "api_outage",
+        "Transient API connectivity issue detected",
+        agent=agent_name,
+        iteration=iteration,
+        error=str(error),
+    )
+
+    while True:
+        elapsed = int(time.time() - outage_started_at)
+        if config.API_MAX_RECOVERY_WAIT_SECONDS > 0 and elapsed >= config.API_MAX_RECOVERY_WAIT_SECONDS:
+            return False
+
+        reachable, detail = _probe_api_base_url()
+        if reachable:
+            append_event(
+                "api_recovered",
+                "API connectivity recovered",
+                agent=agent_name,
+                iteration=iteration,
+                elapsed_seconds=elapsed,
+                detail=detail,
+            )
+            log.warning(
+                f"[{agent_name}] API reachable again after {elapsed}s ({detail}). Retrying iteration {iteration}."
+            )
+            write_state(
+                active_agent=agent_name,
+                message=f"{agent_name} API recovered at iteration {iteration} after {elapsed}s",
+            )
+            return True
+
+        wait_seconds = max(config.API_RECOVERY_POLL_SECONDS, 1)
+        log.warning(
+            f"[{agent_name}] Waiting for API recovery at iteration {iteration} "
+            f"(offline for {elapsed}s, probe={detail!r}). Retrying in {wait_seconds}s."
+        )
+        write_state(
+            active_agent=agent_name,
+            message=f"{agent_name} waiting for network recovery at iteration {iteration} ({elapsed}s)",
+        )
+        time.sleep(wait_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +260,7 @@ class Agent:
         self.last_iterations = 0
         self.last_tool_uses = []
         write_state(active_agent=self.name, message=f"{self.name} started")
+        should_abort = False
 
         for iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
             self.last_iterations = iteration
@@ -144,17 +288,88 @@ class Agent:
                 kwargs["tools"] = tools.TOOL_SCHEMAS + self.extra_tool_schemas
                 kwargs["tool_choice"] = "auto"
 
-            try:
-                response = client.chat.completions.create(**kwargs)
-            except Exception as e:
-                log.error(f"[{self.name}] API error: {e}")
-                consecutive_errors += 1
-                if consecutive_errors >= config.MAX_TOOL_ERRORS:
-                    self.last_stop_reason = "api_error"
-                    log.error(f"[{self.name}] Too many API errors, aborting.")
-                    break
-                time.sleep(2 ** consecutive_errors)
-                continue
+            response = None
+            retryable_attempt = 0
+            outage_started_at: float | None = None
+
+            while response is None:
+                try:
+                    response = client.chat.completions.create(**kwargs)
+                except Exception as e:
+                    if _is_fatal_api_error(e):
+                        self.last_stop_reason = "fatal_api_error"
+                        log.error(f"[{self.name}] Fatal API error: {e}")
+                        write_state(active_agent=self.name, message=f"{self.name} hit a fatal API error")
+                        should_abort = True
+                        break
+
+                    if _is_retryable_api_error(e):
+                        retryable_attempt += 1
+                        if outage_started_at is None:
+                            outage_started_at = time.time()
+
+                        if _is_connectivity_error(e):
+                            log.error(
+                                f"[{self.name}] API connectivity issue at iteration {iteration}: {e}"
+                            )
+                            recovered = _wait_for_api_recovery(
+                                self.name,
+                                iteration,
+                                e,
+                                outage_started_at,
+                            )
+                            if not recovered:
+                                self.last_stop_reason = "api_recovery_timeout"
+                                log.error(
+                                    f"[{self.name}] API recovery wait exceeded "
+                                    f"{config.API_MAX_RECOVERY_WAIT_SECONDS}s; aborting."
+                                )
+                                should_abort = True
+                                break
+                            continue
+
+                        delay = _retry_delay_seconds(retryable_attempt)
+                        log.error(
+                            f"[{self.name}] Transient API error at iteration {iteration}: {e}. "
+                            f"Retrying same iteration in {delay}s."
+                        )
+                        write_state(
+                            active_agent=self.name,
+                            message=f"{self.name} retrying iteration {iteration} after transient API error",
+                        )
+                        append_event(
+                            "api_retry",
+                            "Transient API error",
+                            agent=self.name,
+                            iteration=iteration,
+                            error=str(e),
+                            delay_seconds=delay,
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    log.error(f"[{self.name}] API error: {e}")
+                    consecutive_errors += 1
+                    if consecutive_errors >= config.MAX_TOOL_ERRORS:
+                        self.last_stop_reason = "api_error"
+                        log.error(f"[{self.name}] Too many API errors, aborting.")
+                        should_abort = True
+                        break
+                    time.sleep(2 ** consecutive_errors)
+
+                if response is not None and outage_started_at is not None:
+                    recovered_after = int(time.time() - outage_started_at)
+                    log.info(
+                        f"[{self.name}] API call resumed successfully after {recovered_after}s. "
+                        f"Continuing iteration {iteration} without incrementing counters."
+                    )
+                    write_state(
+                        active_agent=self.name,
+                        message=f"{self.name} resumed iteration {iteration} after API recovery",
+                    )
+
+            if should_abort:
+                break
 
             try:
                 choice = extract_primary_choice(response)
