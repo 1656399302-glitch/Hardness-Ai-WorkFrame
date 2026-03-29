@@ -7,8 +7,8 @@ from __future__ import annotations
 import json
 import time
 import logging
-from urllib import error as urllib_error
-from urllib import request as urllib_request
+import socket
+from urllib.parse import urlparse
 
 from openai import (
     APIConnectionError,
@@ -150,16 +150,14 @@ def _retry_delay_seconds(attempt: int) -> int:
 
 def _probe_api_base_url() -> tuple[bool, str]:
     try:
-        request = urllib_request.Request(
-            config.BASE_URL,
-            headers={"User-Agent": "Harness/1.0"},
-            method="HEAD",
-        )
-        with urllib_request.urlopen(request, timeout=min(config.API_RECOVERY_POLL_SECONDS, 5)) as response:
-            status = getattr(response, "status", 200)
-            return True, f"HTTP {status}"
-    except urllib_error.HTTPError as exc:
-        return True, f"HTTP {exc.code}"
+        parsed = urlparse(config.BASE_URL)
+        host = parsed.hostname
+        if not host:
+            return False, f"Invalid base URL: {config.BASE_URL!r}"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        timeout = max(1.0, min(float(config.API_RECOVERY_POLL_SECONDS), 5.0))
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, f"TCP {host}:{port}"
     except Exception as exc:
         return False, str(exc)
 

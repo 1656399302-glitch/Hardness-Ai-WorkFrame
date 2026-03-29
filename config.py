@@ -53,7 +53,7 @@ ENV_SPECS = [
     EnvSpec(
         name="API_REQUEST_TIMEOUT_SECONDS",
         label="API Request Timeout",
-        default="90",
+        default="600",
         description="Timeout in seconds for a single LLM API request before the harness treats it as transient failure.",
         group="API",
         advanced=True,
