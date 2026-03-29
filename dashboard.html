@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Harness Control Panel</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-2: #1f2630;
+      --border: #2f3947;
+      --text: #e6edf3;
+      --muted: #9aa7b6;
+      --green: #2ea043;
+      --red: #f85149;
+      --yellow: #d29922;
+      --blue: #58a6ff;
+      --accent: #7c9cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #0b1016 0%, #0d1117 100%);
+      color: var(--text);
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 16px;
+      min-height: 100vh;
+      padding: 16px;
+    }
+    .panel {
+      background: rgba(22, 27, 34, 0.95);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.3);
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    h2 { font-size: 16px; margin-bottom: 12px; }
+    .muted { color: var(--muted); }
+    .stack { display: grid; gap: 16px; }
+    .grid { display: grid; gap: 12px; }
+    .grid-2 { grid-template-columns: 1fr 1fr; }
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 6px;
+    }
+    input, textarea, select {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+      font: inherit;
+    }
+    textarea { min-height: 120px; resize: vertical; }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font: inherit;
+      color: white;
+      cursor: pointer;
+      background: linear-gradient(135deg, #5f7cff 0%, #7c9cff 100%);
+    }
+    button.secondary {
+      background: #293241;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    button.danger {
+      background: linear-gradient(135deg, #d64545 0%, #f85149 100%);
+    }
+    .button-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--blue);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+    }
+    .status-badge.running { color: #8bff9d; border-color: rgba(46, 160, 67, 0.35); background: rgba(46, 160, 67, 0.12); }
+    .status-badge.failed, .status-badge.aborted { color: #ff938e; border-color: rgba(248, 81, 73, 0.35); background: rgba(248, 81, 73, 0.12); }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      padding: 12px;
+    }
+    .metric .label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .metric .value { font-size: 18px; font-weight: 700; word-break: break-word; }
+    .logbox {
+      background: #090c10;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      min-height: 520px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      overflow: auto;
+    }
+    .group {
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding-top: 16px;
+    }
+    .env-group {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text);
+    }
+    .checkbox input { width: auto; }
+    .tiny { font-size: 11px; color: var(--muted); }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="stack">
+      <section class="panel">
+        <h1>AI Harness</h1>
+        <p class="muted">Contract-first, evidence-driven, long-running engineering control panel.</p>
+        <div id="statusBadge" class="status-badge">Idle</div>
+      </section>
+
+      <section class="panel">
+        <h2>Run Control</h2>
+        <div class="grid">
+          <div>
+            <label for="prompt">Prompt</label>
+            <textarea id="prompt">Build a release-ready product and obey the sprint contract.</textarea>
+          </div>
+          <div>
+            <label for="resumeDir">Resume Directory</label>
+            <input id="resumeDir" placeholder="workspace/20260328-114410_ai-ai-ui-ai">
+          </div>
+          <div class="grid grid-2">
+            <div>
+              <label for="maxRounds">Max Rounds Override</label>
+              <input id="maxRounds" placeholder="1">
+            </div>
+            <div class="tiny" style="display:flex; align-items:flex-end;">
+              Leave blank to use `.env`.
+            </div>
+          </div>
+          <label class="checkbox"><input id="skipPlanner" type="checkbox" checked> Skip planner</label>
+          <label class="checkbox"><input id="verbose" type="checkbox" checked> Verbose logging</label>
+          <div class="button-row">
+            <button id="startBtn">Start Harness</button>
+            <button id="stopBtn" class="danger">Stop Harness</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Environment</h2>
+        <div id="envContainer"></div>
+        <div class="button-row">
+          <button id="saveEnvBtn" class="secondary">Save .env</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <h2>Process Telemetry</h2>
+        <div class="metric-grid">
+          <div class="metric"><div class="label">Phase</div><div id="phaseMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Round</div><div id="roundMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Active Agent</div><div id="agentMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">PID</div><div id="pidMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Compactions</div><div id="compactionMetric" class="value">0</div></div>
+          <div class="metric"><div class="label">Resets</div><div id="resetMetric" class="value">0</div></div>
+          <div class="metric"><div class="label">Workspace</div><div id="workspaceMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Status Message</div><div id="messageMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Command</div><div id="commandMetric" class="value">-</div></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="button-row" style="justify-content:space-between;">
+          <div>
+            <h2 style="margin-bottom:4px;">Live Log</h2>
+            <div class="tiny">Polling the current run log.</div>
+          </div>
+          <label class="checkbox"><input id="autoScroll" type="checkbox" checked> Auto scroll</label>
+        </div>
+        <div id="logbox" class="logbox"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      logOffset: 0,
+      envSpecs: [],
+      envValues: {},
+    };
+
+    async function getJSON(url) {
+      const response = await fetch(url);
+      return response.json();
+    }
+
+    async function postJSON(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return response.json();
+    }
+
+    function renderEnvForm() {
+      const container = document.getElementById("envContainer");
+      const groups = {};
+      for (const spec of state.envSpecs) {
+        groups[spec.group] ||= [];
+        groups[spec.group].push(spec);
+      }
+
+      container.innerHTML = "";
+      for (const [group, specs] of Object.entries(groups)) {
+        const section = document.createElement("div");
+        section.className = "env-group group";
+        const title = document.createElement("h3");
+        title.textContent = group;
+        section.appendChild(title);
+
+        for (const spec of specs) {
+          const wrapper = document.createElement("div");
+          const label = document.createElement("label");
+          label.textContent = spec.label;
+          wrapper.appendChild(label);
+
+          const input = document.createElement("input");
+          input.id = `env-${spec.name}`;
+          input.type = spec.secret ? "password" : "text";
+          input.value = state.envValues[spec.name] ?? spec.default;
+          wrapper.appendChild(input);
+
+          const desc = document.createElement("div");
+          desc.className = "tiny";
+          desc.textContent = spec.description;
+          wrapper.appendChild(desc);
+          section.appendChild(wrapper);
+        }
+        container.appendChild(section);
+      }
+    }
+
+    async function loadConfig() {
+      const data = await getJSON("/api/config");
+      state.envSpecs = data.specs;
+      state.envValues = data.env;
+      renderEnvForm();
+    }
+
+    function readEnvPayload() {
+      const payload = {};
+      for (const spec of state.envSpecs) {
+        payload[spec.name] = document.getElementById(`env-${spec.name}`).value;
+      }
+      return payload;
+    }
+
+    async function saveEnv() {
+      await postJSON("/api/config", readEnvPayload());
+      alert(".env saved");
+    }
+
+    async function startHarness() {
+      const result = await postJSON("/api/run", {
+        prompt: document.getElementById("prompt").value,
+        resume_dir: document.getElementById("resumeDir").value,
+        skip_planner: document.getElementById("skipPlanner").checked,
+        verbose: document.getElementById("verbose").checked,
+        max_rounds: document.getElementById("maxRounds").value,
+      });
+      if (!result.ok) {
+        alert(result.error || "Failed to start harness");
+        return;
+      }
+      state.logOffset = 0;
+      document.getElementById("logbox").textContent = "";
+      await refreshStatus();
+    }
+
+    async function stopHarness() {
+      await postJSON("/api/stop", {});
+      await refreshStatus();
+    }
+
+    async function refreshStatus() {
+      const data = await getJSON("/api/status");
+      const runtime = data.state || {};
+      const badge = document.getElementById("statusBadge");
+      badge.textContent = runtime.status || (data.running ? "running" : "idle");
+      badge.className = `status-badge ${runtime.status || ""}`;
+
+      document.getElementById("phaseMetric").textContent = runtime.phase || "-";
+      document.getElementById("roundMetric").textContent = runtime.round || "-";
+      document.getElementById("agentMetric").textContent = runtime.active_agent || "-";
+      document.getElementById("pidMetric").textContent = data.pid || "-";
+      document.getElementById("compactionMetric").textContent = runtime.compactions ?? 0;
+      document.getElementById("resetMetric").textContent = runtime.resets ?? 0;
+      document.getElementById("workspaceMetric").textContent = runtime.workspace || "-";
+      document.getElementById("messageMetric").textContent = runtime.message || "-";
+      document.getElementById("commandMetric").textContent = (data.command || []).join(" ") || "-";
+    }
+
+    async function refreshLogs() {
+      const data = await getJSON(`/api/logs?offset=${state.logOffset}`);
+      if (!data.chunk) return;
+      state.logOffset = data.offset;
+      const logbox = document.getElementById("logbox");
+      logbox.textContent += data.chunk;
+      if (document.getElementById("autoScroll").checked) {
+        logbox.scrollTop = logbox.scrollHeight;
+      }
+    }
+
+    async function boot() {
+      await loadConfig();
+      await refreshStatus();
+      document.getElementById("saveEnvBtn").addEventListener("click", saveEnv);
+      document.getElementById("startBtn").addEventListener("click", startHarness);
+      document.getElementById("stopBtn").addEventListener("click", stopHarness);
+      setInterval(refreshStatus, 1000);
+      setInterval(refreshLogs, 1000);
+    }
+
+    boot();
+  </script>
+</body>
+</html>
