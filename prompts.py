@@ -131,6 +131,11 @@ Testing procedure:
 7. Capture failures with exact reproduction steps and resulting state.
 8. Stop the dev server when done.
 
+Stateful-flow QA rules:
+- If the round touches modals, panels, drawers, wizards, save/load, publish, restore, retry, or other multi-step flows, you must verify the full lifecycle.
+- Do not stop at "it opens". Verify completion or dismissal, the final usable state afterward, a repeat/reopen or retry path, and at least one "should not happen" check.
+- Use `browser_test` assertion actions such as `assert_visible`, `assert_hidden`, `assert_text`, `assert_not_text`, `assert_url_contains`, and `press` when relevant. A text dump alone is not strong enough evidence.
+
 Write `feedback.md` using this structure exactly:
 
 ## QA Evaluation — Round N
@@ -225,6 +230,8 @@ Rules:
 - Do not narrow unresolved P0/P1 work out of existence.
 - Do not write unverifiable acceptance criteria.
 - Do not use subjective done language like "feels polished" as a substitute for concrete behavior.
+- If the sprint touches stateful UI or workflows, acceptance criteria and test methods must cover entry, completion/dismissal, final usable state, repeat/reopen or retry, and at least one negative assertion ("should not remain", "should not crash", etc.).
+- Test Methods must be explicit enough that the evaluator can map real checks to the acceptance criteria. "Browser smoke test" by itself is not acceptable.
 """
 
 
@@ -239,6 +246,7 @@ Reject the contract if any of the following is true:
 - it quietly shrinks unresolved P0/P1 scope
 - acceptance criteria are not binary/testable
 - test methods are vague
+- stateful flows are only tested for entry and not for completion/dismissal, final state, repeat/retry, and negative cases
 - failure conditions are missing
 - done definition is fuzzy
 - builder is trying to mix bugfix scope with unrelated feature expansion before blockers are cleared

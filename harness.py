@@ -43,6 +43,90 @@ from skills import SkillRegistry
 
 log = logging.getLogger("harness")
 
+STATEFUL_FLOW_KEYWORDS = (
+    "modal",
+    "dialog",
+    "drawer",
+    "panel",
+    "overlay",
+    "wizard",
+    "tutorial",
+    "workflow",
+    "save",
+    "load",
+    "restore",
+    "submit",
+    "publish",
+    "delete",
+    "retry",
+    "resume",
+    "reopen",
+    "close",
+    "dismiss",
+)
+FINAL_STATE_KEYWORDS = (
+    "close",
+    "closed",
+    "dismiss",
+    "hidden",
+    "complete",
+    "completed",
+    "restored",
+    "usable",
+    "enabled",
+    "idle",
+    "returned",
+    "resume",
+    "saved",
+    "removed",
+)
+NEGATIVE_CHECK_KEYWORDS = (
+    "should not",
+    "does not",
+    "do not",
+    "not remain",
+    "not stuck",
+    "not crash",
+    "no modal",
+    "no dialog",
+    "no panel",
+    "no overlay",
+    "hidden",
+    "absent",
+    "without error",
+)
+REPEAT_CHECK_KEYWORDS = (
+    "again",
+    "reopen",
+    "retry",
+    "repeat",
+    "subsequent",
+    "second time",
+    "multiple times",
+)
+CLOSE_PATH_KEYWORDS = (
+    "close",
+    "dismiss",
+    "cancel",
+    "done",
+    "finish",
+    "submit",
+    "save",
+    "confirm",
+    "resume",
+    "restore",
+    "escape",
+    "esc",
+)
+ASSERTION_ACTION_TYPES = {
+    "assert_text",
+    "assert_not_text",
+    "assert_visible",
+    "assert_hidden",
+    "assert_url_contains",
+}
+NEGATIVE_ASSERTION_ACTION_TYPES = {"assert_not_text", "assert_hidden"}
+
 
 @dataclass
 class EvaluationReport:
@@ -782,6 +866,7 @@ class Harness:
 
     def _audit_contract_alignment(self, report: EvaluationReport) -> list[str]:
         blockers: list[str] = []
+        contract_text = self._read_contract_text()
         if report.contract_round and report.feedback_round < report.contract_round:
             blockers.append(
                 f"feedback round {report.feedback_round} is stale relative to contract round {report.contract_round}"
@@ -795,13 +880,17 @@ class Harness:
                 "QA acceptance criteria total "
                 f"{report.criteria_total} does not match contract criteria total {report.contract_criteria_total}"
             )
-        missing_deliverables = self._find_missing_contract_deliverables()
+        blockers.extend(self._audit_contract_test_depth(contract_text))
+        missing_deliverables = self._find_missing_contract_deliverables(contract_text)
         if missing_deliverables:
             blockers.append("contract deliverables missing from workspace: " + "; ".join(missing_deliverables[:5]))
         return blockers
 
     def _audit_evaluator_execution(self, report: EvaluationReport) -> list[str]:
         blockers: list[str] = []
+        contract_text = self._read_contract_text()
+        stateful_flow_required = self._contract_requires_stateful_flow_checks(contract_text)
+        repeat_path_required = self._text_contains_any(contract_text, REPEAT_CHECK_KEYWORDS)
         tool_uses = getattr(self.evaluator, "last_tool_uses", [])
         browser_calls: list[dict] = []
         malformed_tool_use_seen = False
@@ -826,6 +915,10 @@ class Harness:
         total_actions = 0
         user_actions = 0
         screenshot_seen = False
+        assertion_actions = 0
+        negative_assertions = 0
+        close_or_completion_actions = 0
+        click_targets: dict[str, int] = {}
 
         for call in browser_calls:
             args = call.get("arguments", {})
@@ -855,8 +948,27 @@ class Harness:
             if action_count > 0:
                 interactive_calls += 1
             for action in valid_actions:
-                if action.get("type") in {"click", "fill", "scroll"}:
+                action_type = str(action.get("type", "")).strip().lower()
+                selector_text = str(action.get("selector", "") or "").strip().lower()
+                value_text = str(action.get("value", "") or "").strip().lower()
+                action_text = f"{selector_text} {value_text}".strip()
+
+                if action_type in {"click", "fill", "scroll"}:
                     user_actions += 1
+                if action_type in ASSERTION_ACTION_TYPES:
+                    assertion_actions += 1
+                if action_type in NEGATIVE_ASSERTION_ACTION_TYPES:
+                    negative_assertions += 1
+                if action_type == "click":
+                    if selector_text:
+                        click_targets[selector_text] = click_targets.get(selector_text, 0) + 1
+                    if self._text_contains_any(action_text, CLOSE_PATH_KEYWORDS):
+                        close_or_completion_actions += 1
+                if action_type == "press" and (
+                    value_text in {"escape", "esc", "enter", "return"}
+                    or self._text_contains_any(action_text, CLOSE_PATH_KEYWORDS)
+                ):
+                    close_or_completion_actions += 1
             if "Navigated to" in result and "[error]" not in result:
                 successful_calls += 1
             if "Screenshot saved to _screenshot.png" in result:
@@ -881,6 +993,16 @@ class Harness:
             blockers.append(
                 f"browser_test only performed {total_actions} actions; expected at least {required_actions} for meaningful QA"
             )
+        if report.contract_criteria_total > 1 and assertion_actions == 0:
+            blockers.append("browser_test lacked explicit assertion actions for a multi-criterion contract")
+        if stateful_flow_required and assertion_actions == 0:
+            blockers.append("stateful contract browser_test lacked explicit visible/hidden/text assertions")
+        if stateful_flow_required and negative_assertions == 0:
+            blockers.append("stateful contract browser_test lacked negative assertions for hidden/absent end states")
+        if stateful_flow_required and close_or_completion_actions == 0:
+            blockers.append("stateful contract browser_test never exercised a close/dismiss/complete path")
+        if repeat_path_required and not any(count >= 2 for count in click_targets.values()):
+            blockers.append("browser_test never exercised a reopen/retry/repeat interaction required by the contract")
         if not screenshot_seen:
             blockers.append("browser_test did not produce a screenshot")
         if not (Path(config.WORKSPACE) / "_screenshot.png").exists():
@@ -910,14 +1032,61 @@ class Harness:
         section = self._extract_markdown_section(contract_text, "Acceptance Criteria")
         return len(re.findall(r"(?m)^\s*\d+\.\s+", section))
 
-    def _find_missing_contract_deliverables(self) -> list[str]:
-        section = self._extract_markdown_section(self._read_contract_text(), "Deliverables")
+    def _find_missing_contract_deliverables(self, contract_text: str | None = None) -> list[str]:
+        section = self._extract_markdown_section(contract_text or self._read_contract_text(), "Deliverables")
         deliverables = {match for match in re.findall(r"`([^`\n]+\.[A-Za-z0-9]+)`", section)}
         missing: list[str] = []
         for rel_path in sorted(deliverables):
             if not (Path(config.WORKSPACE) / rel_path).exists():
                 missing.append(rel_path)
         return missing
+
+    def _audit_contract_test_depth(self, contract_text: str) -> list[str]:
+        if not contract_text:
+            return []
+
+        blockers: list[str] = []
+        criteria_items = self._extract_numbered_items(
+            self._extract_markdown_section(contract_text, "Acceptance Criteria")
+        )
+        test_method_items = self._extract_numbered_items(
+            self._extract_markdown_section(contract_text, "Test Methods")
+        )
+        combined_test_text = " ".join(
+            criteria_items
+            + test_method_items
+            + self._extract_numbered_items(self._extract_markdown_section(contract_text, "Done Definition"))
+        )
+
+        if criteria_items and len(test_method_items) < len(criteria_items):
+            blockers.append(
+                "contract test methods only define "
+                f"{len(test_method_items)} checks for {len(criteria_items)} acceptance criteria"
+            )
+
+        if self._contract_requires_stateful_flow_checks(contract_text):
+            if not self._text_contains_any(combined_test_text, FINAL_STATE_KEYWORDS):
+                blockers.append("stateful contract does not require final-state verification")
+            if not self._text_contains_any(combined_test_text, NEGATIVE_CHECK_KEYWORDS):
+                blockers.append("stateful contract does not require negative/non-occurrence verification")
+            if not self._text_contains_any(combined_test_text, REPEAT_CHECK_KEYWORDS):
+                blockers.append("stateful contract does not require reopen/retry/repeat verification")
+
+        return blockers
+
+    @staticmethod
+    def _extract_numbered_items(section_text: str) -> list[str]:
+        if not section_text:
+            return []
+        return [match.group(1).strip() for match in re.finditer(r"(?m)^\s*\d+\.\s+(.*)", section_text)]
+
+    @staticmethod
+    def _text_contains_any(text: str, keywords: tuple[str, ...] | set[str]) -> bool:
+        haystack = text.lower()
+        return any(keyword in haystack for keyword in keywords)
+
+    def _contract_requires_stateful_flow_checks(self, contract_text: str) -> bool:
+        return self._text_contains_any(contract_text, STATEFUL_FLOW_KEYWORDS)
 
     def _scan_placeholder_markers(self) -> list[str]:
         patterns = [

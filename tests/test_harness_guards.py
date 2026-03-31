@@ -7,8 +7,10 @@ from unittest.mock import patch
 import config
 import agents
 import context
+import tools
 from artifacts import ensure_workspace_layout, read_resume_state, write_resume_state
 from harness import EvaluationReport, Harness
+from skills import SkillRegistry
 
 
 class HarnessGuardsTest(unittest.TestCase):
@@ -20,6 +22,33 @@ class HarnessGuardsTest(unittest.TestCase):
     def tearDown(self):
         config.WORKSPACE = self.original_workspace
         self.temp_dir.cleanup()
+
+    def _passing_report(self, *, round_num: int = 1, criteria_total: int = 1) -> EvaluationReport:
+        return EvaluationReport(
+            average_score=9.4,
+            functionality_score=9.4,
+            verdict="PASS",
+            feedback_round=round_num,
+            contract_round=round_num,
+            contract_criteria_total=criteria_total,
+            spec_coverage="FULL",
+            contract_coverage="PASS",
+            build_verification="PASS",
+            browser_verification="PASS",
+            placeholder_ui="NONE",
+            critical_bugs=0,
+            major_bugs=0,
+            minor_bugs=0,
+            criteria_passed=criteria_total,
+            criteria_total=criteria_total,
+            untested_criteria=0,
+            feature_completeness=9.3,
+            functional_correctness=9.4,
+            product_depth=9.2,
+            ux_quality=9.1,
+            code_quality=9.3,
+            operability=9.4,
+        )
 
     def test_compaction_keeps_tool_call_and_result_together(self):
         messages = [
@@ -775,6 +804,277 @@ class HarnessGuardsTest(unittest.TestCase):
         with patch.dict("os.environ", {"MAX_AGENT_ITERATIONS": "100s"}, clear=False):
             with self.assertRaisesRegex(ValueError, "MAX_AGENT_ITERATIONS"):
                 config._get_int_env("MAX_AGENT_ITERATIONS")
+
+    def test_contract_alignment_flags_too_few_test_methods(self):
+        contract = """# Sprint Contract — Round 9
+
+## Deliverables
+1. `src/App.tsx`
+
+## Acceptance Criteria
+1. Dashboard renders
+2. Export works
+3. Help dialog opens
+
+## Test Methods
+1. Run the app once and smoke test the main page
+"""
+        Path(config.WORKSPACE, config.CONTRACT_FILE).write_text(contract, encoding="utf-8")
+        src_dir = Path(config.WORKSPACE) / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "App.tsx").write_text("export const App = () => null;\n", encoding="utf-8")
+
+        blockers = Harness()._audit_contract_alignment(self._passing_report(round_num=9, criteria_total=3))
+        self.assertTrue(any("only define 1 checks for 3 acceptance criteria" in blocker for blocker in blockers))
+
+    def test_contract_alignment_flags_stateful_contract_without_lifecycle_coverage(self):
+        contract = """# Sprint Contract — Round 10
+
+## Deliverables
+1. `src/App.tsx`
+
+## Acceptance Criteria
+1. Settings modal opens from the toolbar
+2. Saving settings updates the selected preference
+
+## Test Methods
+1. Click the toolbar settings button and confirm the modal opens
+2. Save settings from the modal
+
+## Done Definition
+1. Feature works in the browser
+"""
+        Path(config.WORKSPACE, config.CONTRACT_FILE).write_text(contract, encoding="utf-8")
+        src_dir = Path(config.WORKSPACE) / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "App.tsx").write_text("export const App = () => null;\n", encoding="utf-8")
+
+        blockers = Harness()._audit_contract_alignment(self._passing_report(round_num=10, criteria_total=2))
+        self.assertTrue(any("final-state verification" in blocker for blocker in blockers))
+        self.assertTrue(any("negative/non-occurrence verification" in blocker for blocker in blockers))
+        self.assertTrue(any("reopen/retry/repeat verification" in blocker for blocker in blockers))
+
+    def test_evaluator_execution_requires_assertions_for_stateful_flows(self):
+        contract = """# Sprint Contract — Round 11
+
+## Deliverables
+1. `src/App.tsx`
+
+## Acceptance Criteria
+1. Settings modal opens from the toolbar
+2. Pressing Escape closes the modal and returns the page to a usable state
+3. The modal can be reopened after closing
+4. The modal should not remain visible after close
+
+## Test Methods
+1. Click the toolbar button and assert the modal is visible
+2. Press Escape, assert the modal is hidden, and confirm the page remains usable
+3. Reopen the modal and assert it renders again
+4. Assert the modal text is absent after closing
+"""
+        Path(config.WORKSPACE, config.CONTRACT_FILE).write_text(contract, encoding="utf-8")
+        (Path(config.WORKSPACE) / "_screenshot.png").write_bytes(b"fake image")
+
+        harness = Harness()
+        harness.evaluator.last_tool_uses = [
+            {
+                "name": "browser_test",
+                "arguments": {
+                    "url": "http://localhost:5173",
+                    "actions": [
+                        {"type": "click", "selector": "[aria-label='open settings']"},
+                        {"type": "press", "value": "Escape"},
+                        {"type": "click", "selector": "[aria-label='open settings']"},
+                    ],
+                },
+                "result": "Navigated to http://localhost:5173 — title: App\nScreenshot saved to _screenshot.png",
+            }
+        ]
+
+        blockers = harness._audit_evaluator_execution(self._passing_report(round_num=11, criteria_total=4))
+        self.assertTrue(any("lacked explicit assertion actions" in blocker for blocker in blockers))
+        self.assertTrue(any("lacked negative assertions" in blocker for blocker in blockers))
+
+    def test_evaluator_execution_accepts_stateful_flow_with_repeat_and_negative_checks(self):
+        contract = """# Sprint Contract — Round 12
+
+## Deliverables
+1. `src/App.tsx`
+
+## Acceptance Criteria
+1. Settings modal opens from the toolbar
+2. Pressing Escape closes the modal and returns the page to a usable state
+3. The modal can be reopened after closing
+4. The modal should not remain visible after close
+
+## Test Methods
+1. Click the toolbar button and assert the modal is visible
+2. Press Escape, assert the modal is hidden, and confirm the page remains usable
+3. Reopen the modal and assert it renders again
+4. Assert the modal text is absent after closing
+"""
+        Path(config.WORKSPACE, config.CONTRACT_FILE).write_text(contract, encoding="utf-8")
+        (Path(config.WORKSPACE) / "_screenshot.png").write_bytes(b"fake image")
+
+        harness = Harness()
+        harness.evaluator.last_tool_uses = [
+            {
+                "name": "browser_test",
+                "arguments": {
+                    "url": "http://localhost:5173",
+                    "actions": [
+                        {"type": "click", "selector": "[aria-label='open settings']"},
+                        {"type": "assert_visible", "selector": "#settings-modal"},
+                        {"type": "press", "value": "Escape"},
+                        {"type": "assert_hidden", "selector": "#settings-modal"},
+                        {"type": "click", "selector": "[aria-label='open settings']"},
+                        {"type": "assert_visible", "selector": "#settings-modal"},
+                        {"type": "assert_not_text", "value": "Saving..."},
+                    ],
+                },
+                "result": "Navigated to http://localhost:5173 — title: App\nScreenshot saved to _screenshot.png",
+            }
+        ]
+
+        blockers = harness._audit_evaluator_execution(self._passing_report(round_num=12, criteria_total=4))
+        self.assertEqual(blockers, [])
+
+    def test_browser_test_supports_press_and_assertion_actions(self):
+        class FakeLocator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+
+            def press(self, key_name, timeout=5000):
+                self.page._handle_press(key_name)
+
+            def inner_text(self):
+                if self.selector == "#modal" and "#modal" in self.page.visible_selectors:
+                    return "Modal Ready"
+                return self.page.selector_text.get(self.selector, "")
+
+            def wait_for(self, state="visible", timeout=5000):
+                is_visible = self.selector in self.page.visible_selectors
+                if state == "visible" and not is_visible:
+                    raise AssertionError(f"{self.selector} was not visible")
+                if state == "hidden" and is_visible:
+                    raise AssertionError(f"{self.selector} was still visible")
+
+        class FakeKeyboard:
+            def __init__(self, page):
+                self.page = page
+
+            def press(self, key_name):
+                self.page._handle_press(key_name)
+
+        class FakePage:
+            def __init__(self):
+                self.url = "http://localhost:5173"
+                self.visible_selectors = set()
+                self.selector_text = {}
+                self.keyboard = FakeKeyboard(self)
+
+            def goto(self, url, timeout=15000):
+                self.url = url
+
+            def wait_for_load_state(self, state, timeout=5000):
+                return None
+
+            def title(self):
+                return "Harness Demo"
+
+            def on(self, _event, _handler):
+                return None
+
+            def click(self, selector, timeout=5000):
+                if selector == "[aria-label='open modal']":
+                    self.visible_selectors.add("#modal")
+                if selector == "[aria-label='close modal']":
+                    self.visible_selectors.discard("#modal")
+
+            def fill(self, selector, value, timeout=5000):
+                self.selector_text[selector] = value
+
+            def wait_for_timeout(self, delay):
+                return None
+
+            def evaluate(self, script):
+                if script.startswith("window.scrollBy"):
+                    return None
+                return True
+
+            def locator(self, selector):
+                return FakeLocator(self, selector)
+
+            def inner_text(self, selector):
+                if selector == "body":
+                    return "Harness Demo Modal Ready" if "#modal" in self.visible_selectors else "Harness Demo"
+                return self.selector_text.get(selector, "")
+
+            def screenshot(self, path, full_page=True):
+                Path(path).write_bytes(b"fake screenshot")
+
+            def _handle_press(self, key_name):
+                if key_name.lower() in {"escape", "esc"}:
+                    self.visible_selectors.discard("#modal")
+
+        class FakeBrowser:
+            def __init__(self, page):
+                self.page = page
+
+            def new_page(self, viewport=None):
+                return self.page
+
+            def close(self):
+                return None
+
+        class FakePlaywright:
+            def __init__(self, page):
+                self.chromium = self
+                self.page = page
+
+            def launch(self, headless=True):
+                return FakeBrowser(self.page)
+
+        class FakePlaywrightContext:
+            def __init__(self, page):
+                self.page = page
+
+            def __enter__(self):
+                return FakePlaywright(self.page)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        fake_page = FakePage()
+
+        with patch.object(tools, "HAS_PLAYWRIGHT", True), patch.object(
+            tools,
+            "sync_playwright",
+            return_value=FakePlaywrightContext(fake_page),
+        ):
+            result = tools.browser_test(
+                "http://localhost:5173",
+                actions=[
+                    {"type": "click", "selector": "[aria-label='open modal']"},
+                    {"type": "assert_visible", "selector": "#modal"},
+                    {"type": "assert_text", "value": "Modal Ready"},
+                    {"type": "press", "value": "Escape"},
+                    {"type": "assert_hidden", "selector": "#modal"},
+                    {"type": "assert_not_text", "value": "Modal Ready"},
+                ],
+            )
+
+        self.assertIn("Asserted visible: #modal", result)
+        self.assertIn("Pressed key 'Escape'", result)
+        self.assertIn("Asserted hidden: #modal", result)
+        self.assertIn("Asserted text absent: 'Modal Ready'", result)
+        self.assertNotIn("[error]", result)
+        self.assertTrue((Path(config.WORKSPACE) / "_screenshot.png").exists())
+
+    def test_skill_registry_discovers_stateful_flow_testing_skill(self):
+        registry = SkillRegistry()
+        self.assertTrue(any(skill["name"] == "stateful-flow-testing" for skill in registry.catalog))
 
 
 if __name__ == "__main__":

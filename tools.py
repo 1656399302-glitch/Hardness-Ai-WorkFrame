@@ -204,9 +204,12 @@ def browser_test(
     optionally take a screenshot. Returns a text report of what happened.
 
     actions is a list of dicts, each with:
-      - type: "click" | "fill" | "wait" | "evaluate" | "scroll"
+      - type: "click" | "fill" | "wait" | "evaluate" | "scroll" | "press"
+              | "assert_text" | "assert_not_text" | "assert_visible"
+              | "assert_hidden" | "assert_url_contains"
       - selector: CSS selector (for click/fill)
-      - value: text to type (for fill), JS code (for evaluate)
+      - value: text to type (for fill), JS code (for evaluate), key name (for press),
+               or expected text/URL substring for assertion actions
       - delay: ms to wait (for wait)
 
     If start_command is provided, starts a dev server first.
@@ -275,6 +278,47 @@ def browser_test(
                     elif action_type == "scroll":
                         page.evaluate(f"window.scrollBy(0, {value or 500})")
                         report_lines.append(f"Scrolled by {value or 500}px")
+                    elif action_type == "press":
+                        key_name = str(value or "Enter")
+                        if selector:
+                            page.locator(selector).press(key_name, timeout=5000)
+                            report_lines.append(f"Pressed '{key_name}' on '{selector}'")
+                        else:
+                            page.keyboard.press(key_name)
+                            report_lines.append(f"Pressed key '{key_name}'")
+                    elif action_type == "assert_text":
+                        expected = str(value or "")
+                        if not expected:
+                            raise ValueError("assert_text requires a non-empty value")
+                        haystack = page.locator(selector).inner_text() if selector else page.inner_text("body")
+                        if expected not in haystack:
+                            raise AssertionError(f"Expected text not found: {expected[:120]}")
+                        report_lines.append(f"Asserted text present: '{expected[:120]}'")
+                    elif action_type == "assert_not_text":
+                        expected = str(value or "")
+                        if not expected:
+                            raise ValueError("assert_not_text requires a non-empty value")
+                        haystack = page.locator(selector).inner_text() if selector else page.inner_text("body")
+                        if expected in haystack:
+                            raise AssertionError(f"Unexpected text was present: {expected[:120]}")
+                        report_lines.append(f"Asserted text absent: '{expected[:120]}'")
+                    elif action_type == "assert_visible":
+                        if not selector:
+                            raise ValueError("assert_visible requires a selector")
+                        page.locator(selector).wait_for(state="visible", timeout=5000)
+                        report_lines.append(f"Asserted visible: {selector}")
+                    elif action_type == "assert_hidden":
+                        if not selector:
+                            raise ValueError("assert_hidden requires a selector")
+                        page.locator(selector).wait_for(state="hidden", timeout=5000)
+                        report_lines.append(f"Asserted hidden: {selector}")
+                    elif action_type == "assert_url_contains":
+                        expected = str(value or "")
+                        if not expected:
+                            raise ValueError("assert_url_contains requires a non-empty value")
+                        if expected not in page.url:
+                            raise AssertionError(f"URL '{page.url}' did not contain '{expected}'")
+                        report_lines.append(f"Asserted URL contains: '{expected[:120]}'")
                     else:
                         report_lines.append(f"[warn] Unknown action type: {action_type}")
                 except Exception as e:
@@ -457,16 +501,28 @@ BROWSER_TOOL_SCHEMAS = [
                             "properties": {
                                 "type": {
                                     "type": "string",
-                                    "enum": ["click", "fill", "wait", "evaluate", "scroll"],
+                                    "enum": [
+                                        "click",
+                                        "fill",
+                                        "wait",
+                                        "evaluate",
+                                        "scroll",
+                                        "press",
+                                        "assert_text",
+                                        "assert_not_text",
+                                        "assert_visible",
+                                        "assert_hidden",
+                                        "assert_url_contains",
+                                    ],
                                     "description": "Action type",
                                 },
                                 "selector": {
                                     "type": "string",
-                                    "description": "CSS selector (for click/fill)",
+                                    "description": "CSS selector (for click/fill/assert_visible/assert_hidden, optional for press/assert_text)",
                                 },
                                 "value": {
                                     "type": "string",
-                                    "description": "Text for fill, JS code for evaluate, pixels for scroll",
+                                    "description": "Text for fill, JS code for evaluate, pixels for scroll, key for press, expected text/URL substring for assertions",
                                 },
                                 "delay": {
                                     "type": "integer",
