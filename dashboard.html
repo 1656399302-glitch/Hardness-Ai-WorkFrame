@@ -84,6 +84,19 @@
       gap: 8px;
       flex-wrap: wrap;
     }
+    .run-summary {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+    }
+    .run-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
     .status-badge {
       display: inline-flex;
       align-items: center;
@@ -125,6 +138,88 @@
       border-top: 1px solid rgba(255,255,255,0.06);
       padding-top: 16px;
     }
+    .queue-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .queue-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+    }
+    .queue-list {
+      display: grid;
+      gap: 10px;
+      max-height: 360px;
+      overflow: auto;
+    }
+    .queue-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .queue-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .queue-content {
+      white-space: pre-wrap;
+      line-height: 1.45;
+      font-size: 13px;
+    }
+    .queue-status {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid transparent;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .queue-status.pending {
+      color: #ffd98c;
+      background: rgba(210, 153, 34, 0.12);
+      border-color: rgba(210, 153, 34, 0.35);
+    }
+    .queue-status.processed {
+      color: #8bff9d;
+      background: rgba(46, 160, 67, 0.12);
+      border-color: rgba(46, 160, 67, 0.35);
+    }
+    .queue-status.invalid {
+      color: #ff938e;
+      background: rgba(248, 81, 73, 0.12);
+      border-color: rgba(248, 81, 73, 0.35);
+    }
+    .queue-tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .queue-empty {
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
     .env-group {
       display: grid;
       gap: 12px;
@@ -157,15 +252,20 @@
       <section class="panel">
         <h2>Run Control</h2>
         <div class="grid">
-          <div>
+          <div id="runSummary" class="run-summary">
+            <div><strong id="runProjectName">No active project</strong></div>
+            <div id="runProjectPath" class="tiny">No cached workspace.</div>
+            <div id="runProjectState" class="tiny">Ready to start a new harness run.</div>
+          </div>
+          <div id="newRunFields">
             <label for="prompt">Prompt</label>
             <textarea id="prompt">Build a release-ready product and obey the sprint contract.</textarea>
           </div>
-          <div>
+          <div id="resumeDirField">
             <label for="resumeDir">Resume Directory</label>
             <input id="resumeDir" placeholder="workspace/20260328-114410_ai-ai-ui-ai">
           </div>
-          <div class="grid grid-2">
+          <div id="newRunOptions" class="grid grid-2">
             <div>
               <label for="maxRounds">Max Rounds Override</label>
               <input id="maxRounds" placeholder="1">
@@ -174,11 +274,13 @@
               Leave blank to use `.env`.
             </div>
           </div>
-          <label class="checkbox"><input id="skipPlanner" type="checkbox" checked> Skip planner</label>
-          <label class="checkbox"><input id="verbose" type="checkbox" checked> Verbose logging</label>
-          <div class="button-row">
+          <label id="skipPlannerRow" class="checkbox"><input id="skipPlanner" type="checkbox" checked> Skip planner</label>
+          <label id="verboseRow" class="checkbox"><input id="verbose" type="checkbox" checked> Verbose logging</label>
+          <div id="runActions" class="run-actions">
             <button id="startBtn">Start Harness</button>
-            <button id="stopBtn" class="danger">Stop Harness</button>
+            <button id="continueBtn" style="display:none;">Continue</button>
+            <button id="clearHistoryBtn" class="secondary" style="display:none;">Clear History</button>
+            <button id="stopBtn" class="danger" style="display:none;">Stop Harness</button>
           </div>
         </div>
       </section>
@@ -188,6 +290,38 @@
         <div id="envContainer"></div>
         <div class="button-row">
           <button id="saveEnvBtn" class="secondary">Save .env</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Insert Instruction</h2>
+        <div class="grid">
+          <div>
+            <label for="instructionContent">Instruction</label>
+            <textarea id="instructionContent" placeholder="Queue a must-fix note for the next build or evaluation phase."></textarea>
+          </div>
+          <div class="grid grid-2">
+            <div>
+              <label for="instructionScope">Scope</label>
+              <select id="instructionScope">
+                <option value="next_contract">Next Contract</option>
+                <option value="next_build">Next Build</option>
+                <option value="next_evaluate">Next Evaluate</option>
+                <option value="next_round" selected>Next Round</option>
+              </select>
+            </div>
+            <div>
+              <label for="instructionMode">Mode</label>
+              <select id="instructionMode">
+                <option value="advisory" selected>Advisory</option>
+                <option value="must_fix">Must Fix</option>
+              </select>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="enqueueInstructionBtn">Queue Instruction</button>
+          </div>
+          <div class="tiny">Instructions are injected only at the next matching phase boundary, so the current phase keeps running untouched.</div>
         </div>
       </section>
     </div>
@@ -202,10 +336,25 @@
           <div class="metric"><div class="label">PID</div><div id="pidMetric" class="value">-</div></div>
           <div class="metric"><div class="label">Compactions</div><div id="compactionMetric" class="value">0</div></div>
           <div class="metric"><div class="label">Resets</div><div id="resetMetric" class="value">0</div></div>
+          <div class="metric"><div class="label">Project</div><div id="projectMetric" class="value">-</div></div>
           <div class="metric"><div class="label">Workspace</div><div id="workspaceMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Cached Project</div><div id="cachedProjectMetric" class="value">-</div></div>
+          <div class="metric"><div class="label">Cached Workspace</div><div id="cachedWorkspaceMetric" class="value">-</div></div>
           <div class="metric"><div class="label">Status Message</div><div id="messageMetric" class="value">-</div></div>
           <div class="metric"><div class="label">Command</div><div id="commandMetric" class="value">-</div></div>
         </div>
+      </section>
+
+      <section class="panel">
+        <div class="button-row" style="justify-content:space-between; align-items:flex-start;">
+          <div>
+            <h2 style="margin-bottom:4px;">Operator Inbox</h2>
+            <div class="tiny">Current queued instructions and whether they have already been consumed by the harness.</div>
+          </div>
+          <button id="refreshInboxBtn" class="secondary">Refresh Inbox</button>
+        </div>
+        <div id="inboxSummary" class="queue-meta"></div>
+        <div id="operatorInboxList" class="queue-list"></div>
       </section>
 
       <section class="panel">
@@ -226,6 +375,8 @@
       logOffset: 0,
       envSpecs: [],
       envValues: {},
+      operatorInbox: { items: [], summary: { pending: 0, processed: 0, invalid: 0 } },
+      status: {},
     };
 
     async function getJSON(url) {
@@ -300,6 +451,100 @@
       alert(".env saved");
     }
 
+    function selectedWorkspace() {
+      const runtimeWorkspace = state.status.current_workspace || "";
+      if (runtimeWorkspace) return runtimeWorkspace;
+      const cachedWorkspace = state.status.cached_workspace || "";
+      if (cachedWorkspace) return cachedWorkspace;
+      return document.getElementById("resumeDir").value.trim();
+    }
+
+    function formatTimestamp(value) {
+      if (!value) return "—";
+      const date = new Date(Number(value) * 1000);
+      if (Number.isNaN(date.getTime())) return "—";
+      return date.toLocaleString();
+    }
+
+    function renderOperatorInbox() {
+      const summaryEl = document.getElementById("inboxSummary");
+      const listEl = document.getElementById("operatorInboxList");
+      const summary = state.operatorInbox.summary || {};
+      summaryEl.innerHTML = [
+        `<span class="queue-pill">Workspace: ${escapeHtml(state.operatorInbox.workspace || selectedWorkspace() || "—")}</span>`,
+        `<span class="queue-pill">Pending: ${summary.pending ?? 0}</span>`,
+        `<span class="queue-pill">Processed: ${summary.processed ?? 0}</span>`,
+        `<span class="queue-pill">Invalid: ${summary.invalid ?? 0}</span>`,
+      ].join("");
+
+      const items = [...(state.operatorInbox.items || [])].sort((a, b) => {
+        const statusRank = { pending: 0, invalid: 1, processed: 2 };
+        const aRank = statusRank[a.status] ?? 9;
+        const bRank = statusRank[b.status] ?? 9;
+        if (aRank !== bRank) return aRank - bRank;
+        return Number(b.created_at || 0) - Number(a.created_at || 0);
+      });
+
+      if (!items.length) {
+        listEl.innerHTML = '<div class="queue-empty">No operator instructions queued for this workspace.</div>';
+        return;
+      }
+
+      listEl.innerHTML = items.map((item) => `
+        <article class="queue-item">
+          <div class="queue-row">
+            <div class="queue-tags">
+              <span class="queue-status ${item.status || "pending"}">${item.status || "pending"}</span>
+              <span class="queue-pill">${item.scope || "next_round"}</span>
+              <span class="queue-pill">${item.mode || "advisory"}</span>
+              <span class="queue-pill">${item.id || "unknown-id"}</span>
+            </div>
+          </div>
+          <div class="queue-content">${escapeHtml(item.content || "")}</div>
+          <div class="tiny">Created: ${formatTimestamp(item.created_at)}</div>
+          <div class="tiny">Processed: ${formatTimestamp(item.processed_at)} | Phase: ${item.processed_phase || "—"} | Round: ${item.processed_round || "—"}</div>
+          <div class="tiny">Result: ${escapeHtml(item.result || "—")}</div>
+        </article>
+      `).join("");
+    }
+
+    async function loadOperatorInbox() {
+      const workspace = selectedWorkspace();
+      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+      const data = await getJSON(`/api/operator-inbox${query}`);
+      state.operatorInbox = data;
+      renderOperatorInbox();
+    }
+
+    async function enqueueInstruction() {
+      const contentEl = document.getElementById("instructionContent");
+      const payload = {
+        content: contentEl.value.trim(),
+        scope: document.getElementById("instructionScope").value,
+        mode: document.getElementById("instructionMode").value,
+        workspace: selectedWorkspace(),
+      };
+      if (!payload.content) {
+        alert("Instruction content is required.");
+        return;
+      }
+      const result = await postJSON("/api/operator-inbox", payload);
+      if (!result.ok) {
+        alert(result.error || "Failed to queue instruction.");
+        return;
+      }
+      contentEl.value = "";
+      state.operatorInbox = result.inbox || state.operatorInbox;
+      renderOperatorInbox();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
     async function startHarness() {
       const result = await postJSON("/api/run", {
         prompt: document.getElementById("prompt").value,
@@ -322,8 +567,105 @@
       await refreshStatus();
     }
 
+    async function continueHarness() {
+      const cachedWorkspace = state.status.cached_workspace || "";
+      if (!cachedWorkspace) {
+        alert("No cached workspace to continue.");
+        return;
+      }
+      const result = await postJSON("/api/run", {
+        prompt: "Continue from the existing workspace. Read spec.md, contract.md, feedback.md, progress.md, and the current codebase. Fix remaining blockers and continue toward release-ready completion.",
+        resume_dir: cachedWorkspace,
+        skip_planner: true,
+        verbose: true,
+        max_rounds: "",
+      });
+      if (!result.ok) {
+        alert(result.error || "Failed to continue harness");
+        return;
+      }
+      state.logOffset = 0;
+      document.getElementById("logbox").textContent = "";
+      await refreshStatus();
+    }
+
+    async function clearHistory() {
+      await postJSON("/api/clear-history", {});
+      await refreshStatus();
+      await loadOperatorInbox();
+    }
+
+    function renderRunControl(data) {
+      const running = !!data.running;
+      const currentWorkspace = data.current_workspace || "";
+      const cachedWorkspace = data.cached_workspace || "";
+      const currentProjectName = data.current_project_name || "";
+      const cachedProjectName = data.cached_project_name || "";
+
+      const summaryName = document.getElementById("runProjectName");
+      const summaryPath = document.getElementById("runProjectPath");
+      const summaryState = document.getElementById("runProjectState");
+
+      const startBtn = document.getElementById("startBtn");
+      const continueBtn = document.getElementById("continueBtn");
+      const clearHistoryBtn = document.getElementById("clearHistoryBtn");
+      const stopBtn = document.getElementById("stopBtn");
+
+      const newRunFields = document.getElementById("newRunFields");
+      const resumeDirField = document.getElementById("resumeDirField");
+      const newRunOptions = document.getElementById("newRunOptions");
+      const skipPlannerRow = document.getElementById("skipPlannerRow");
+      const verboseRow = document.getElementById("verboseRow");
+
+      if (running) {
+        summaryName.textContent = currentProjectName || "Harness is running";
+        summaryPath.textContent = currentWorkspace || "Workspace will appear after bootstrap.";
+        summaryState.textContent = data.state?.message || "Harness is actively working.";
+        startBtn.style.display = "none";
+        continueBtn.style.display = "none";
+        clearHistoryBtn.style.display = "none";
+        stopBtn.style.display = "";
+        newRunFields.style.display = "none";
+        resumeDirField.style.display = "none";
+        newRunOptions.style.display = "none";
+        skipPlannerRow.style.display = "none";
+        verboseRow.style.display = "none";
+        return;
+      }
+
+      stopBtn.style.display = "none";
+
+      if (cachedWorkspace) {
+        summaryName.textContent = cachedProjectName || "Cached workspace available";
+        summaryPath.textContent = cachedWorkspace;
+        summaryState.textContent = "No active harness run. Continue the cached workspace or clear it.";
+        startBtn.style.display = "none";
+        continueBtn.style.display = "";
+        clearHistoryBtn.style.display = "";
+        newRunFields.style.display = "none";
+        resumeDirField.style.display = "none";
+        newRunOptions.style.display = "none";
+        skipPlannerRow.style.display = "none";
+        verboseRow.style.display = "none";
+        return;
+      }
+
+      summaryName.textContent = "No active project";
+      summaryPath.textContent = "No cached workspace.";
+      summaryState.textContent = "Start a new harness run.";
+      startBtn.style.display = "";
+      continueBtn.style.display = "none";
+      clearHistoryBtn.style.display = "none";
+      newRunFields.style.display = "none";
+      resumeDirField.style.display = "none";
+      newRunOptions.style.display = "none";
+      skipPlannerRow.style.display = "none";
+      verboseRow.style.display = "none";
+    }
+
     async function refreshStatus() {
       const data = await getJSON("/api/status");
+      state.status = data;
       const runtime = data.state || {};
       const badge = document.getElementById("statusBadge");
       badge.textContent = runtime.status || (data.running ? "running" : "idle");
@@ -335,9 +677,13 @@
       document.getElementById("pidMetric").textContent = data.pid || "-";
       document.getElementById("compactionMetric").textContent = runtime.compactions ?? 0;
       document.getElementById("resetMetric").textContent = runtime.resets ?? 0;
-      document.getElementById("workspaceMetric").textContent = runtime.workspace || "-";
+      document.getElementById("projectMetric").textContent = data.current_project_name || "-";
+      document.getElementById("workspaceMetric").textContent = data.current_workspace || "-";
+      document.getElementById("cachedProjectMetric").textContent = data.cached_project_name || "-";
+      document.getElementById("cachedWorkspaceMetric").textContent = data.cached_workspace || "-";
       document.getElementById("messageMetric").textContent = runtime.message || "-";
       document.getElementById("commandMetric").textContent = (data.command || []).join(" ") || "-";
+      renderRunControl(data);
     }
 
     async function refreshLogs() {
@@ -354,11 +700,17 @@
     async function boot() {
       await loadConfig();
       await refreshStatus();
+      await loadOperatorInbox();
       document.getElementById("saveEnvBtn").addEventListener("click", saveEnv);
       document.getElementById("startBtn").addEventListener("click", startHarness);
+      document.getElementById("continueBtn").addEventListener("click", continueHarness);
+      document.getElementById("clearHistoryBtn").addEventListener("click", clearHistory);
       document.getElementById("stopBtn").addEventListener("click", stopHarness);
+      document.getElementById("enqueueInstructionBtn").addEventListener("click", enqueueInstruction);
+      document.getElementById("refreshInboxBtn").addEventListener("click", loadOperatorInbox);
       setInterval(refreshStatus, 1000);
       setInterval(refreshLogs, 1000);
+      setInterval(loadOperatorInbox, 2000);
     }
 
     boot();

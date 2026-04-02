@@ -83,7 +83,44 @@ Evaluator 现在按六维评分：
 - runtime 会记录 phase、round、active agent、compaction 次数、reset 次数
 - 这些状态同时服务于 CLI 和 dashboard
 
-### 5. 本地 HTML Dashboard
+### 5. Operator 指令队列（运行时插入需求）
+
+如果 Harness 已经在运行，不要直接修改正在工作的 agent context。
+应该把人工指令写入队列文件：
+
+```text
+<workspace>/.ai-harness/runtime/operator-inbox.json
+```
+
+Harness 只在 phase 边界（contract、build、evaluate）读取这个文件。这意味着：
+- 当前 phase 不会被干扰
+- 下一个匹配的 phase 会收到新指令
+- 处理过的条目会被标记，不会重复注入
+
+支持的 scope：
+- `next_contract` — 下一轮合同阶段
+- `next_build` — 下一轮构建阶段
+- `next_evaluate` — 下一轮评估阶段
+- `next_round` — 在下一个合同阶段应用
+
+示例：
+
+```json
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "operator-item-1",
+      "scope": "next_build",
+      "mode": "must_fix",
+      "content": "先修掉弹窗关闭 Bug，再加新功能",
+      "status": "pending"
+    }
+  ]
+}
+```
+
+### 6. 本地 HTML Dashboard
 
 支持：
 
@@ -163,3 +200,5 @@ http://127.0.0.1:8765
 python3 -m py_compile harness.py config.py prompts.py agents.py context.py logger.py tools.py artifacts.py runtime_state.py dashboard_server.py
 python3 -m unittest tests.test_harness_guards -v
 ```
+
+

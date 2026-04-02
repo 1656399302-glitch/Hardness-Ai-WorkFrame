@@ -55,6 +55,14 @@ Document the release gate for this project.
 """,
 }
 
+DEFAULT_OPERATOR_INBOX = {
+    "schema_version": 1,
+    "items": [],
+}
+VALID_OPERATOR_INBOX_SCOPES = {"next_contract", "next_build", "next_evaluate", "next_round"}
+VALID_OPERATOR_INBOX_MODES = {"advisory", "must_fix"}
+VALID_OPERATOR_INBOX_STATUSES = {"pending", "processed", "invalid"}
+
 
 @dataclass(frozen=True)
 class ArtifactPaths:
@@ -217,3 +225,145 @@ def write_resume_state(
     current["updated_at"] = time.time()
     target.write_text(json.dumps(current, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     return current
+
+
+def operator_inbox_path(workspace: str | Path | None = None) -> Path:
+    paths = ensure_workspace_layout(workspace)
+    return paths.runtime_dir / "operator-inbox.json"
+
+
+def _empty_operator_inbox() -> dict[str, Any]:
+    return {"schema_version": DEFAULT_OPERATOR_INBOX["schema_version"], "items": []}
+
+
+def _normalize_operator_inbox_item(raw: Any, index: int) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        item = dict(raw)
+    else:
+        item = {"content": str(raw)}
+
+    item_id = str(item.get("id") or f"operator-item-{index + 1}")
+    content = str(item.get("content") or item.get("prompt") or item.get("message") or "").strip()
+    scope = str(item.get("scope") or "next_round").strip().lower()
+    mode = str(item.get("mode") or "advisory").strip().lower()
+    status = str(item.get("status") or "pending").strip().lower()
+
+    if scope not in VALID_OPERATOR_INBOX_SCOPES:
+        scope = "next_round"
+    if mode not in VALID_OPERATOR_INBOX_MODES:
+        mode = "advisory"
+    if status not in VALID_OPERATOR_INBOX_STATUSES:
+        status = "pending"
+    if not content:
+        status = "invalid"
+
+    normalized = {
+        "id": item_id,
+        "content": content,
+        "scope": scope,
+        "mode": mode,
+        "status": status,
+        "created_at": item.get("created_at"),
+        "processed_at": item.get("processed_at"),
+        "processed_phase": item.get("processed_phase"),
+        "processed_round": item.get("processed_round"),
+        "result": item.get("result", ""),
+    }
+    if "metadata" in item and isinstance(item["metadata"], dict):
+        normalized["metadata"] = item["metadata"]
+    return normalized
+
+
+def read_operator_inbox(workspace: str | Path | None = None) -> dict[str, Any]:
+    target = operator_inbox_path(workspace)
+    if not target.exists():
+        return _empty_operator_inbox()
+
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return _empty_operator_inbox()
+
+    if isinstance(raw, list):
+        raw = {"schema_version": 1, "items": raw}
+    if not isinstance(raw, dict):
+        return _empty_operator_inbox()
+
+    items = raw.get("items")
+    if not isinstance(items, list):
+        items = []
+
+    return {
+        "schema_version": 1,
+        "items": [_normalize_operator_inbox_item(item, index) for index, item in enumerate(items)],
+    }
+
+
+def write_operator_inbox(payload: dict[str, Any], workspace: str | Path | None = None) -> dict[str, Any]:
+    target = operator_inbox_path(workspace)
+    items = payload.get("items") if isinstance(payload, dict) else []
+    normalized = {
+        "schema_version": 1,
+        "items": [_normalize_operator_inbox_item(item, index) for index, item in enumerate(items or [])],
+    }
+    target.write_text(json.dumps(normalized, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    return normalized
+
+
+def enqueue_operator_instruction(
+    content: str,
+    *,
+    scope: str = "next_round",
+    mode: str = "advisory",
+    workspace: str | Path | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    inbox = read_operator_inbox(workspace)
+    item = _normalize_operator_inbox_item(
+        {
+            "id": f"operator-item-{int(time.time() * 1000)}",
+            "content": content,
+            "scope": scope,
+            "mode": mode,
+            "status": "pending",
+            "created_at": time.time(),
+            "metadata": metadata or {},
+        },
+        len(inbox["items"]),
+    )
+    inbox["items"].append(item)
+    write_operator_inbox(inbox, workspace)
+    return item
+
+
+def claim_operator_instructions(
+    phase: str,
+    round_num: int,
+    workspace: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    inbox = read_operator_inbox(workspace)
+    phase_key = str(phase or "").strip().lower()
+    claimed: list[dict[str, Any]] = []
+    changed = False
+
+    def _matches(scope: str) -> bool:
+        if scope == "next_round":
+            return phase_key == "contract"
+        return scope == f"next_{phase_key}"
+
+    for item in inbox["items"]:
+        if item.get("status") != "pending":
+            continue
+        if not _matches(str(item.get("scope") or "")):
+            continue
+        item["status"] = "processed"
+        item["processed_at"] = time.time()
+        item["processed_phase"] = phase_key
+        item["processed_round"] = round_num
+        item["result"] = f"Injected into {phase_key} phase of round {round_num}"
+        claimed.append(dict(item))
+        changed = True
+
+    if changed:
+        write_operator_inbox(inbox, workspace)
+    return claimed

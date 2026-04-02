@@ -79,6 +79,44 @@ Runtime state tracks:
 - compaction count
 - reset count
 
+### Operator inbox for queued human instructions
+
+If the harness is already running, avoid mutating the live agent context directly.
+Instead, queue human instructions in:
+
+```text
+<workspace>/.ai-harness/runtime/operator-inbox.json
+```
+
+The harness reads this file only at phase boundaries (`contract`, `build`, `evaluate`).
+That means:
+- the current phase is not disturbed
+- the next matching phase can receive the new instruction
+- processed items are marked so they are not injected repeatedly
+
+Supported scopes:
+- `next_contract`
+- `next_build`
+- `next_evaluate`
+- `next_round` (applies at the next contract phase)
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "operator-item-1",
+      "scope": "next_build",
+      "mode": "must_fix",
+      "content": "Fix the latest modal close bug before adding new scope.",
+      "status": "pending"
+    }
+  ]
+}
+```
+
 ### Local HTML dashboard
 
 The dashboard supports:

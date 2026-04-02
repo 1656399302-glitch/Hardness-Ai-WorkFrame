@@ -29,6 +29,7 @@ import tools
 from agents import Agent, extract_primary_choice
 from artifacts import (
     append_decision,
+    claim_operator_instructions,
     ensure_workspace_layout,
     read_resume_state,
     sync_contract,
@@ -267,10 +268,12 @@ class Harness:
         write_state(
             status="running",
             phase="bootstrap",
+            pid=os.getpid(),
             workspace=config.WORKSPACE,
             prompt=user_prompt,
             start_time=total_start,
             current_run_command=" ".join(sys.argv),
+            current_run_argv=list(sys.argv),
             message="Harness bootstrapping",
         )
         append_event("run_started", "Harness run started", workspace=config.WORKSPACE)
@@ -354,7 +357,11 @@ class Harness:
                         message=f"Contract negotiation for round {round_num}",
                     )
                     contract_start = time.time()
-                    self._negotiate_contract(round_num)
+                    contract_operator_notes = self._consume_operator_inbox_for_phase("contract", round_num)
+                    if contract_operator_notes:
+                        self._negotiate_contract(round_num, operator_notes=contract_operator_notes)
+                    else:
+                        self._negotiate_contract(round_num)
                     sync_contract(round_num, config.WORKSPACE)
                     append_decision(
                         f"Round {round_num} Contract",
@@ -377,7 +384,8 @@ class Harness:
                         message=f"Build phase for round {round_num}",
                     )
                     build_start = time.time()
-                    build_task = self._build_task(round_num, score_history)
+                    build_operator_notes = self._consume_operator_inbox_for_phase("build", round_num)
+                    build_task = self._build_task(round_num, score_history, operator_notes=build_operator_notes)
                     self.builder.run(build_task)
                     log.info(f"Build round {round_num} completed in {time.time() - build_start:.0f}s")
 
@@ -412,7 +420,8 @@ class Harness:
                         message=f"Evaluation phase for round {round_num}",
                     )
                     eval_start = time.time()
-                    self.evaluator.run(self._evaluation_task(round_num))
+                    evaluate_operator_notes = self._consume_operator_inbox_for_phase("evaluate", round_num)
+                    self.evaluator.run(self._evaluation_task(round_num, operator_notes=evaluate_operator_notes))
                     tools.stop_dev_server()
                     log.info(f"Evaluation round {round_num} completed in {time.time() - eval_start:.0f}s")
 
@@ -545,7 +554,50 @@ class Harness:
             "git commit -m 'init' --allow-empty >/dev/null 2>&1"
         )
 
-    def _build_task(self, round_num: int, score_history: list[float]) -> str:
+    def _consume_operator_inbox_for_phase(self, phase: str, round_num: int) -> str:
+        items = claim_operator_instructions(phase, round_num, config.WORKSPACE)
+        if not items:
+            return ""
+
+        append_event(
+            "operator_inbox_consumed",
+            "Operator inbox items injected into phase",
+            phase=phase,
+            round=round_num,
+            item_ids=[item.get("id") for item in items],
+        )
+        append_decision(
+            f"Round {round_num} {phase.title()} Operator Inbox",
+            "Injected queued operator instructions into the phase boundary: "
+            + "; ".join(f"{item.get('id')}[{item.get('mode')}]" for item in items),
+            config.WORKSPACE,
+        )
+
+        lines = [
+            "Operator Inbox instructions were queued asynchronously by the human operator.",
+            "These instructions were intentionally injected at the phase boundary so earlier phases were not disturbed.",
+            "Treat MUST_FIX items as mandatory scope for this phase.",
+        ]
+        for index, item in enumerate(items, start=1):
+            lines.append(
+                f"{index}. [{str(item.get('mode', 'advisory')).upper()} | {item.get('id')}] "
+                f"{str(item.get('content') or '').strip()}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _append_operator_notes(task_lines: list[str], operator_notes: str) -> list[str]:
+        if operator_notes:
+            task_lines.extend(
+                [
+                    "",
+                    "Operator Inbox",
+                    operator_notes,
+                ]
+            )
+        return task_lines
+
+    def _build_task(self, round_num: int, score_history: list[float], operator_notes: str = "") -> str:
         feedback_path = Path(config.WORKSPACE) / config.FEEDBACK_FILE
         prev_feedback = feedback_path.read_text(encoding="utf-8") if feedback_path.exists() else ""
 
@@ -587,31 +639,33 @@ class Harness:
                 "Commit your work with git when the round is complete.",
             ]
         )
-        return "\n".join(task)
+        return "\n".join(self._append_operator_notes(task, operator_notes))
 
-    def _evaluation_task(self, round_num: int) -> str:
-        return "\n".join(
-            [
-                f"This is QA round {round_num}.",
-                "Read spec.md, contract.md, progress.md, and feedback.md if it exists.",
-                "Verify every contract criterion against the running system.",
-                "Use browser_test with meaningful interactions.",
-                "Do not infer correctness from code alone.",
-                "Write the QA report to feedback.md and stop the dev server when done.",
-            ]
-        )
+    def _evaluation_task(self, round_num: int, operator_notes: str = "") -> str:
+        task = [
+            f"This is QA round {round_num}.",
+            "Read spec.md, contract.md, progress.md, and feedback.md if it exists.",
+            "Verify every contract criterion against the running system.",
+            "Use browser_test with meaningful interactions.",
+            "Do not infer correctness from code alone.",
+            "Write the QA report to feedback.md and stop the dev server when done.",
+        ]
+        return "\n".join(self._append_operator_notes(task, operator_notes))
 
-    def _negotiate_contract(self, round_num: int, max_iterations: int = 3) -> None:
-        self.contract_proposer.run(
-            f"This is round {round_num}. Read spec.md and feedback.md if it exists. "
-            "Write the sprint contract to contract.md."
-        )
+    def _negotiate_contract(self, round_num: int, max_iterations: int = 3, operator_notes: str = "") -> None:
+        proposer_task = [
+            f"This is round {round_num}. Read spec.md and feedback.md if it exists.",
+            "Write the sprint contract to contract.md.",
+        ]
+        self.contract_proposer.run("\n".join(self._append_operator_notes(proposer_task, operator_notes)))
         for iteration in range(max_iterations):
             log.info(f"[contract] Review iteration {iteration + 1}/{max_iterations}")
-            self.contract_reviewer.run(
-                f"Review the contract in contract.md for round {round_num}. "
-                "Approve only if it is specific, honest, and testable."
-            )
+            reviewer_task = [
+                f"Review the contract in contract.md for round {round_num}.",
+                "Approve only if it is specific, honest, and testable.",
+                "If operator inbox instructions were injected for this phase, reject the contract if they were ignored.",
+            ]
+            self.contract_reviewer.run("\n".join(self._append_operator_notes(reviewer_task, operator_notes)))
             contract_path = Path(config.WORKSPACE) / config.CONTRACT_FILE
             if contract_path.exists():
                 contract_text = contract_path.read_text(encoding="utf-8")
@@ -620,9 +674,11 @@ class Harness:
                     return
             if iteration < max_iterations - 1:
                 log.info("[contract] Contract needs revision, builder revising...")
-                self.contract_proposer.run(
-                    "The contract reviewer requested changes. Read contract.md, revise it, and save contract.md again."
-                )
+                revision_task = [
+                    "The contract reviewer requested changes. Read contract.md, revise it, and save contract.md again.",
+                    "Do not drop or weaken operator inbox instructions that target this contract round.",
+                ]
+                self.contract_proposer.run("\n".join(self._append_operator_notes(revision_task, operator_notes)))
         log.warning("[contract] Max iterations reached; proceeding with current contract.")
 
     def _write_round_handoff(

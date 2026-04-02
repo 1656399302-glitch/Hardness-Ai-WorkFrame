@@ -26,6 +26,7 @@ def _default_state() -> dict[str, Any]:
         "status": "idle",
         "phase": "",
         "round": 0,
+        "pid": None,
         "workspace": "",
         "prompt": "",
         "active_agent": "",
@@ -35,6 +36,7 @@ def _default_state() -> dict[str, Any]:
         "compactions": 0,
         "resets": 0,
         "current_run_command": "",
+        "current_run_argv": [],
     }
 
 

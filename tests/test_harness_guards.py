@@ -8,7 +8,15 @@ import config
 import agents
 import context
 import tools
-from artifacts import ensure_workspace_layout, read_resume_state, write_resume_state
+from artifacts import (
+    claim_operator_instructions,
+    enqueue_operator_instruction,
+    ensure_workspace_layout,
+    operator_inbox_path,
+    read_operator_inbox,
+    read_resume_state,
+    write_resume_state,
+)
 from harness import EvaluationReport, Harness
 from skills import SkillRegistry
 
@@ -535,6 +543,75 @@ class HarnessGuardsTest(unittest.TestCase):
         self.assertTrue((paths.runbooks_dir / "setup.md").exists())
         self.assertTrue((paths.runbooks_dir / "test.md").exists())
         self.assertTrue((paths.runbooks_dir / "release.md").exists())
+
+    def test_operator_inbox_claim_marks_item_processed_once(self):
+        item = enqueue_operator_instruction(
+            "Fix the latest blocking bug before adding new scope.",
+            scope="next_build",
+            mode="must_fix",
+            workspace=config.WORKSPACE,
+        )
+
+        first_claim = claim_operator_instructions("build", 4, config.WORKSPACE)
+        second_claim = claim_operator_instructions("build", 4, config.WORKSPACE)
+        inbox = read_operator_inbox(config.WORKSPACE)
+
+        self.assertEqual(len(first_claim), 1)
+        self.assertEqual(first_claim[0]["id"], item["id"])
+        self.assertEqual(second_claim, [])
+        self.assertEqual(inbox["items"][0]["status"], "processed")
+        self.assertEqual(inbox["items"][0]["processed_phase"], "build")
+        self.assertEqual(inbox["items"][0]["processed_round"], 4)
+
+    def test_operator_inbox_next_round_waits_for_contract_boundary(self):
+        enqueue_operator_instruction(
+            "Carry this requirement into the next remediation round.",
+            scope="next_round",
+            workspace=config.WORKSPACE,
+        )
+
+        build_claim = claim_operator_instructions("build", 7, config.WORKSPACE)
+        inbox_after_build = read_operator_inbox(config.WORKSPACE)
+        contract_claim = claim_operator_instructions("contract", 8, config.WORKSPACE)
+        inbox_after_contract = read_operator_inbox(config.WORKSPACE)
+
+        self.assertEqual(build_claim, [])
+        self.assertEqual(inbox_after_build["items"][0]["status"], "pending")
+        self.assertEqual(len(contract_claim), 1)
+        self.assertEqual(inbox_after_contract["items"][0]["status"], "processed")
+        self.assertEqual(inbox_after_contract["items"][0]["processed_round"], 8)
+
+    def test_harness_build_task_includes_consumed_operator_inbox_notes(self):
+        enqueue_operator_instruction(
+            "Must fix the known modal close bug in this build phase.",
+            scope="next_build",
+            mode="must_fix",
+            workspace=config.WORKSPACE,
+        )
+
+        harness = Harness()
+        operator_notes = harness._consume_operator_inbox_for_phase("build", 5)
+        task = harness._build_task(5, [], operator_notes=operator_notes)
+        inbox = read_operator_inbox(config.WORKSPACE)
+
+        self.assertIn("Operator Inbox", task)
+        self.assertIn("Must fix the known modal close bug", task)
+        self.assertIn("MUST_FIX", task)
+        self.assertEqual(inbox["items"][0]["status"], "processed")
+
+    def test_operator_inbox_supports_manual_list_format(self):
+        target = operator_inbox_path(config.WORKSPACE)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            '[{"content":"Review the flaky test failure.","scope":"next_evaluate"}]\n',
+            encoding="utf-8",
+        )
+
+        inbox = read_operator_inbox(config.WORKSPACE)
+
+        self.assertEqual(len(inbox["items"]), 1)
+        self.assertEqual(inbox["items"][0]["scope"], "next_evaluate")
+        self.assertEqual(inbox["items"][0]["status"], "pending")
 
     def test_structured_feedback_extracts_blocking_reasons(self):
         feedback = """## QA Evaluation — Round 4
